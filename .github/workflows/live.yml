@@ -51,18 +51,28 @@ jobs:
           DURATION_MINUTES: ${{ inputs.duration_minutes }}
         run: |
           set +e
-          timeout "$((DURATION_MINUTES * 60))" ffmpeg -re -stream_loop -1 \
-            -f concat -safe 0 -i concat.txt \
-            -c:v libx264 -preset veryfast \
-            -b:v 2000k -maxrate 2000k -bufsize 8000k \
-            -pix_fmt yuv420p -g 50 -keyint_min 50 -bf 0 \
-            -c:a aac -b:a 128k -ar 44100 \
-            -f flv "$RTMP_URL"
-          code=$?
-          if [ "$code" -ne 0 ] && [ "$code" -ne 124 ]; then
-            echo "ffmpeg uscito con codice $code"
-            exit "$code"
-          fi
+          end_time=$(( $(date +%s) + DURATION_MINUTES * 60 ))
+          while [ "$(date +%s)" -lt "$end_time" ]; do
+            remaining=$(( end_time - $(date +%s) ))
+            ffmpeg -re -stream_loop -1 \
+              -f concat -safe 0 -i concat.txt \
+              -c:v libx264 -preset veryfast \
+              -b:v 2000k -maxrate 2000k -bufsize 8000k \
+              -pix_fmt yuv420p -g 50 -keyint_min 50 -bf 0 \
+              -c:a aac -b:a 128k -ar 44100 \
+              -f flv "$RTMP_URL" &
+            pid=$!
+            ( sleep "$remaining" && kill "$pid" 2>/dev/null ) &
+            watchdog=$!
+            wait "$pid"
+            code=$?
+            kill "$watchdog" 2>/dev/null
+            if [ "$(date +%s)" -ge "$end_time" ]; then
+              break
+            fi
+            echo "ffmpeg terminato (codice $code) prima della fine rotazione — riconnetto tra 3s"
+            sleep 3
+          done
 
       - name: cleanup
         if: always()
