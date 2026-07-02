@@ -1,0 +1,67 @@
+name: live
+
+on:
+  workflow_dispatch:
+    inputs:
+      genre:
+        required: true
+        type: string
+      video_ids:
+        description: "JSON array di ID file Drive"
+        required: true
+        type: string
+      rtmp_url:
+        required: true
+        type: string
+      duration_minutes:
+        required: false
+        type: string
+        default: "345"
+
+jobs:
+  relay:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - name: mask rtmp url
+        run: echo "::add-mask::${{ inputs.rtmp_url }}"
+
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: install deps
+        run: pip install --quiet google-api-python-client google-auth
+
+      - name: write service account key
+        run: echo '${{ secrets.GDRIVE_SA_KEY }}' > sa.json
+
+      - name: download videos from drive
+        env:
+          VIDEO_IDS: ${{ inputs.video_ids }}
+        run: python download.py
+
+      - name: relay to rtmp
+        env:
+          RTMP_URL: ${{ inputs.rtmp_url }}
+          DURATION_MINUTES: ${{ inputs.duration_minutes }}
+        run: |
+          set +e
+          timeout "$((DURATION_MINUTES * 60))" ffmpeg -re -stream_loop -1 \
+            -f concat -safe 0 -i concat.txt \
+            -c:v libx264 -preset veryfast \
+            -b:v 2000k -maxrate 2000k -bufsize 8000k \
+            -pix_fmt yuv420p -g 50 -keyint_min 50 -bf 0 \
+            -c:a aac -b:a 128k -ar 44100 \
+            -f flv "$RTMP_URL"
+          code=$?
+          if [ "$code" -ne 0 ] && [ "$code" -ne 124 ]; then
+            echo "ffmpeg uscito con codice $code"
+            exit "$code"
+          fi
+
+      - name: cleanup
+        if: always()
+        run: rm -f sa.json
