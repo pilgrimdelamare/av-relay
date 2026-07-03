@@ -73,17 +73,25 @@ jobs:
           kill "$ffmpeg_pid" 2>/dev/null
           wait "$ffmpeg_pid" 2>/dev/null
 
-          ffmpeg -f concat -safe 0 -i concat.txt -c copy merged.mp4
+          readarray -t paths < <(ls -1 videos/*.mp4 2>/dev/null | sort)
+          n=${#paths[@]}
+          cmd=(ffmpeg -re)
+          filterin=""
+          for ((i=0; i<n; i++)); do
+            cmd+=(-i "${paths[$i]}")
+            filterin="${filterin}[${i}:v][${i}:a]"
+          done
+          cmd+=(-filter_complex "${filterin}concat=n=${n}:v=1:a=1[v][a]")
+          cmd+=(-map "[v]" -map "[a]")
+          cmd+=(-c:v libx264 -preset veryfast)
+          cmd+=(-b:v 2000k -maxrate 2000k -bufsize 2000k)
+          cmd+=(-pix_fmt yuv420p -g 50 -keyint_min 50 -bf 0)
+          cmd+=(-c:a aac -b:a 128k -ar 44100)
+          cmd+=(-f flv "$RTMP_URL")
 
           while [ "$(date +%s)" -lt "$end_time" ]; do
             remaining=$(( end_time - $(date +%s) ))
-            ffmpeg -re -stream_loop -1 \
-              -i merged.mp4 \
-              -c:v libx264 -preset veryfast \
-              -b:v 2000k -maxrate 2000k -bufsize 2000k \
-              -pix_fmt yuv420p -g 50 -keyint_min 50 -bf 0 \
-              -c:a aac -b:a 128k -ar 44100 \
-              -f flv "$RTMP_URL" &
+            "${cmd[@]}" &
             pid=$!
             ( sleep "$remaining" && kill "$pid" 2>/dev/null ) &
             watchdog=$!
