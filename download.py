@@ -41,9 +41,26 @@ def download_batch(ids: list[str], start_index: int, max_workers: int = 5) -> li
     return [p for p in paths if p]
 
 
+def get_duration(path: str) -> float | None:
+    import subprocess
+    try:
+        r = subprocess.run(
+            ["ffprobe", "-v", "quiet", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", path],
+            capture_output=True, text=True, timeout=10,
+        )
+        return float(r.stdout.strip())
+    except Exception:
+        return None
+
+
 def write_concat(paths: list[str]):
     with open("concat.txt", "w", encoding="utf-8") as f:
-        f.write("\n".join(f"file '{p}'" for p in paths))
+        for p in paths:
+            f.write(f"file '{p}'\n")
+            dur = get_duration(p)
+            if dur:
+                f.write(f"duration {dur:.6f}\n")
 
 
 def rebuild_concat_from_dir() -> list[str]:
