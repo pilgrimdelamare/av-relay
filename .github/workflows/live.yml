@@ -64,7 +64,7 @@ jobs:
             -c:v libx264 -preset veryfast \
             -b:v 2000k -maxrate 2000k -bufsize 2000k \
             -pix_fmt yuv420p -g 50 -keyint_min 50 -bf 0 \
-            -c:a aac -b:a 128k -ar 44100 \
+            -c:a aac -b:a 128k -ar 44100 -af aresample=async=1 \
             -f flv "$RTMP_URL" &
           ffmpeg_pid=$!
 
@@ -80,7 +80,7 @@ jobs:
               -c:v libx264 -preset veryfast \
               -b:v 2000k -maxrate 2000k -bufsize 2000k \
               -pix_fmt yuv420p -g 50 -keyint_min 50 -bf 0 \
-              -c:a aac -b:a 128k -ar 44100 \
+              -c:a aac -b:a 128k -ar 44100 -af aresample=async=1 \
               -f flv "$RTMP_URL" &
             pid=$!
             ( sleep "$remaining" && kill "$pid" 2>/dev/null ) &
