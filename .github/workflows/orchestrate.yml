@@ -20,13 +20,13 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: install deps
+      - name: setup
         run: pip install --quiet google-api-python-client google-auth
 
-      - name: write service account key
+      - name: auth
         run: echo '${{ secrets.GDRIVE_SA_KEY }}' > sa.json
 
-      - name: run orchestrator
+      - name: run
         env:
           DRIVE_ROOT_FOLDER_ID: ${{ secrets.DRIVE_ROOT_FOLDER_ID }}
           YT_CLIENT_ID:         ${{ secrets.YT_CLIENT_ID }}

@@ -1,20 +1,8 @@
-"""
-orchestrate.py - Orchestratore live 24/7, 5 generi simultanei.
-Gira su schedule (vedi .github/workflows/orchestrate.yml) senza dipendere dal
-ThinkPad: censisce i brani per genere su Drive, mantiene un pool "senza
-ripetizioni fino a esaurimento", tiene vivo un broadcast YouTube persistente
-per genere, e dispaccia live.yml (stesso repo) con il nuovo lotto ogni 5h.
-
-Stato e censimento vivono su Google Drive (mai in git — questo repo deve
-restare "muto"): stesso Service Account gia' usato per il download
-(GDRIVE_SA_KEY), scope allargato a drive.readonly + drive.file.
-"""
 import datetime
 import json
 import logging
 import os
 import random
-import sys
 import time
 import urllib.error
 import urllib.request
@@ -22,15 +10,12 @@ import urllib.request
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 logger = logging.getLogger("orchestrate")
 
-BATCH_SIZE           = 25
-MIN_VIDEOS_FOR_LIVE  = 5
-CENSUS_INTERVAL      = datetime.timedelta(hours=5)
-RELAY_DURATION_MIN   = 290   # 5h - margine, sotto il tetto di 6h/job di Actions
-STATE_FOLDER_NAME    = "_orchestrator_state"
+BATCH_SIZE          = 25
+MIN_VIDEOS_FOR_LIVE = 5
+CENSUS_INTERVAL     = datetime.timedelta(hours=5)
+RELAY_DURATION_MIN  = 290
+STATE_FOLDER_NAME   = "_orchestrator_state"
 
-# Stessa fonte di core/config.py GENRES / LIVE_DESCRIPTIONS in majesty_music —
-# duplicato qui perche' questo repo non ha accesso a quel codice. Tenere allineato
-# a mano se i generi cambiano.
 GENRES = ["electro-swing", "rock", "pop", "k-pop", "lofi-chillout"]
 
 LIVE_DESCRIPTIONS = {
@@ -74,8 +59,6 @@ LIVE_DESCRIPTIONS = {
     ),
 }
 
-
-# ── Drive ─────────────────────────────────────────────────────────────────
 
 def get_drive_service():
     from google.oauth2.service_account import Credentials
@@ -130,8 +113,6 @@ def get_or_create_state_folder(drive, root_folder_id: str) -> str:
 
 
 def census_genre(drive, root_folder_id: str, genre: str) -> list[str]:
-    """Elenca gli ID Drive di tutti i video caricati per un genere:
-    <root>/<genere>/<data>/*.mp4 (traversal a 2 livelli, paginato)."""
     genre_folder_id = find_folder(drive, genre, root_folder_id)
     if not genre_folder_id:
         return []
@@ -169,8 +150,6 @@ def write_state_file(drive, folder_id: str, filename: str, data: dict):
         drive.files().create(body=meta, media_body=media, fields="id").execute()
 
 
-# ── YouTube ───────────────────────────────────────────────────────────────
-
 def get_youtube_service():
     from google.oauth2.credentials import Credentials
     from googleapiclient.discovery import build
@@ -186,8 +165,6 @@ def get_youtube_service():
 
 
 def create_persistent_broadcast(yt, genre: str) -> tuple | None:
-    """Broadcast persistente: enableAutoStop=False, non va chiuso da solo su
-    un buco RTMP transitorio durante l'handoff tra un job di relay e il successivo."""
     try:
         scheduled = (
             datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=60)
@@ -225,10 +202,10 @@ def create_persistent_broadcast(yt, genre: str) -> tuple | None:
         rtmp_url  = f"{ingest['ingestionAddress']}/{ingest['streamName']}"
 
         yt.liveBroadcasts().bind(part="id,contentDetails", id=broadcast_id, streamId=stream_id).execute()
-        logger.info(f"[{genre}] broadcast persistente creato: {broadcast_id}")
+        logger.info(f"{genre}: ok")
         return broadcast_id, stream_id, rtmp_url
     except Exception as e:
-        logger.error(f"[{genre}] create_persistent_broadcast fallito: {e}")
+        logger.error(f"{genre}: err {e}")
         return None
 
 
@@ -239,23 +216,20 @@ def broadcast_is_alive(yt, broadcast_id: str) -> bool:
         if not items:
             return False
         return items[0]["status"]["lifeCycleStatus"] not in ("complete", "revoked")
-    except Exception as e:
-        logger.warning(f"broadcast_is_alive fallito per {broadcast_id}: {e}")
+    except Exception:
         return False
 
 
 def end_broadcast(yt, broadcast_id: str, stream_id: str):
     try:
         yt.liveBroadcasts().transition(broadcastStatus="complete", id=broadcast_id, part="status").execute()
-    except Exception as e:
-        logger.warning(f"end_broadcast (transition) fallito: {e}")
+    except Exception:
+        pass
     try:
         yt.liveStreams().delete(id=stream_id).execute()
-    except Exception as e:
-        logger.warning(f"end_broadcast (delete stream) fallito: {e}")
+    except Exception:
+        pass
 
-
-# ── GitHub (dispatch live.yml, stesso repo) ─────────────────────────────────
 
 def _gh_request(repo: str, token: str, method: str, path: str, payload: dict = None):
     url  = f"https://api.github.com/repos/{repo}/{path}"
@@ -289,7 +263,7 @@ def dispatch_relay(genre: str, video_ids: list[str], rtmp_url: str, duration_min
             },
         })
     except urllib.error.HTTPError as e:
-        logger.error(f"[{genre}] dispatch live.yml HTTP {e.code}: {e.read()[:200]}")
+        logger.error(f"{genre}: err {e.code}")
         return None
 
     for _ in range(10):
@@ -304,11 +278,9 @@ def dispatch_relay(genre: str, video_ids: list[str], rtmp_url: str, duration_min
                     return run["id"]
         except Exception:
             pass
-    logger.error(f"[{genre}] impossibile trovare il run live.yml appena dispacciato")
+    logger.error(f"{genre}: err no-run")
     return None
 
-
-# ── Orchestrazione per genere ────────────────────────────────────────────
 
 def process_genre(drive, yt, root_folder_id: str, state_folder_id: str, genre: str, control: dict):
     state = read_state_file(drive, state_folder_id, f"{genre}.json") or {
@@ -319,12 +291,9 @@ def process_genre(drive, yt, root_folder_id: str, state_folder_id: str, genre: s
     enabled = control.get(genre, True)
     if not enabled:
         if state.get("broadcast_id"):
-            logger.info(f"[{genre}] disabilitato — chiudo il broadcast persistente")
             end_broadcast(yt, state["broadcast_id"], state["stream_id"])
             state["broadcast_id"] = state["stream_id"] = state["rtmp_url"] = None
             write_state_file(drive, state_folder_id, f"{genre}.json", state)
-        else:
-            logger.info(f"[{genre}] disabilitato — nessuna azione")
         return
 
     last = state.get("last_dispatch_at")
@@ -333,37 +302,33 @@ def process_genre(drive, yt, root_folder_id: str, state_folder_id: str, genre: s
         - datetime.datetime.fromisoformat(last)
     ) >= CENSUS_INTERVAL
     if not due:
-        logger.info(f"[{genre}] non ancora dovuto un nuovo censimento")
         return
 
     if len(state["pool"]) < MIN_VIDEOS_FOR_LIVE:
         all_ids = census_genre(drive, root_folder_id, genre)
         if len(all_ids) < MIN_VIDEOS_FOR_LIVE:
-            logger.warning(f"[{genre}] solo {len(all_ids)} video su Drive — minimo {MIN_VIDEOS_FOR_LIVE}, salto")
+            logger.warning(f"{genre}: skip ({len(all_ids)})")
             return
         random.shuffle(all_ids)
         state["pool"]  = all_ids
         state["cycle"] = state.get("cycle", 0) + 1
-        logger.info(f"[{genre}] nuovo ciclo #{state['cycle']}: {len(all_ids)} video censiti")
 
     batch, state["pool"] = state["pool"][:BATCH_SIZE], state["pool"][BATCH_SIZE:]
 
     if not state.get("broadcast_id") or not broadcast_is_alive(yt, state["broadcast_id"]):
         result = create_persistent_broadcast(yt, genre)
         if not result:
-            logger.error(f"[{genre}] impossibile creare il broadcast — riprovo al prossimo giro")
             return
         state["broadcast_id"], state["stream_id"], state["rtmp_url"] = result
 
     run_id = dispatch_relay(genre, batch, state["rtmp_url"], RELAY_DURATION_MIN)
     if not run_id:
-        logger.error(f"[{genre}] dispatch live.yml fallito — riprovo al prossimo giro")
         return
 
     state["run_id"] = run_id
     state["last_dispatch_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
     write_state_file(drive, state_folder_id, f"{genre}.json", state)
-    logger.info(f"[{genre}] dispacciato run={run_id} con {len(batch)} video")
+    logger.info(f"{genre}: ok {len(batch)}")
 
 
 def main():
@@ -378,7 +343,7 @@ def main():
         try:
             process_genre(drive, yt, root_folder_id, state_folder_id, genre, control)
         except Exception as e:
-            logger.error(f"[{genre}] errore non gestito: {e}")
+            logger.error(f"{genre}: err {e}")
 
 
 if __name__ == "__main__":

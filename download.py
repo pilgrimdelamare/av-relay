@@ -17,7 +17,6 @@ def get_service():
 
 
 def download_one(file_id: str, index: int) -> str:
-    # ogni thread costruisce il proprio client: googleapiclient non e' thread-safe se condiviso
     svc  = get_service()
     path = os.path.join(OUT_DIR, f"{index:04d}.mp4")
     req  = svc.files().get_media(fileId=file_id)
@@ -37,9 +36,8 @@ def download_batch(ids: list[str], start_index: int, max_workers: int = 5) -> li
             i = futures[fut]
             try:
                 paths[i] = fut.result()
-                print(f"scaricato {ids[i]} -> {paths[i]}", flush=True)
-            except Exception as e:
-                print(f"fallito {ids[i]}: {e}", file=sys.stderr, flush=True)
+            except Exception:
+                pass
     return [p for p in paths if p]
 
 
@@ -57,15 +55,6 @@ def rebuild_concat_from_dir() -> list[str]:
 
 
 def main():
-    """Tre modalita':
-    - 'first': scarica solo i primi FIRST_N video (in parallelo) e scrive concat.txt —
-      serve a far partire ffmpeg il prima possibile.
-    - 'rest': scarica il resto della lista in parallelo, poi riscrive concat.txt con
-      tutti i video gia' presenti in `videos/` (i primi + questi) — usato per l'unico
-      hot-swap di ffmpeg a lotto completo.
-    - 'all' (default): scarica tutto in un colpo, comportamento semplice per usi futuri
-      fuori dal flusso first/rest.
-    """
     phase     = sys.argv[1] if len(sys.argv) > 1 else "all"
     video_ids = json.loads(os.environ["VIDEO_IDS"])
     first_n   = int(os.environ.get("FIRST_N", "5"))
@@ -74,11 +63,9 @@ def main():
     if phase == "first":
         batch = video_ids[:first_n]
         if not batch:
-            print("nessun video da scaricare", file=sys.stderr)
             sys.exit(1)
         paths = download_batch(batch, 0)
         if not paths:
-            print("primo lotto: tutti i download falliti", file=sys.stderr)
             sys.exit(1)
         write_concat(paths)
 
@@ -87,13 +74,11 @@ def main():
         if rest:
             download_batch(rest, first_n)
         if not rebuild_concat_from_dir():
-            print("nessun video disponibile dopo il completamento", file=sys.stderr)
             sys.exit(1)
 
     else:
         paths = download_batch(video_ids, 0)
         if not paths:
-            print("tutti i download falliti", file=sys.stderr)
             sys.exit(1)
         write_concat(paths)
 

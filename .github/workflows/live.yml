@@ -7,7 +7,6 @@ on:
         required: true
         type: string
       video_ids:
-        description: "JSON array di ID file Drive"
         required: true
         type: string
       rtmp_url:
@@ -23,7 +22,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 360
     steps:
-      - name: mask rtmp url
+      - name: mask
         run: echo "::add-mask::${{ inputs.rtmp_url }}"
 
       - uses: actions/checkout@v4
@@ -32,21 +31,21 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: install deps
+      - name: setup
         run: |
           pip install --quiet google-api-python-client google-auth
           sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
 
-      - name: write service account key
+      - name: auth
         run: echo '${{ secrets.GDRIVE_SA_KEY }}' > sa.json
 
-      - name: download first batch from drive
+      - name: fetch
         env:
           VIDEO_IDS: ${{ inputs.video_ids }}
           FIRST_N: "5"
         run: python download.py first
 
-      - name: relay to rtmp (avvio veloce + un hot-swap quando il lotto e' completo)
+      - name: run
         env:
           VIDEO_IDS:        ${{ inputs.video_ids }}
           FIRST_N:          "5"
@@ -56,7 +55,6 @@ jobs:
           set +e
           end_time=$(( $(date +%s) + DURATION_MINUTES * 60 ))
 
-          # Fase 1: via subito con i primi 5 video mentre gli altri scaricano in background
           ffmpeg -re -stream_loop -1 \
             -f concat -safe 0 -i concat.txt \
             -c:v libx264 -preset veryfast \
@@ -65,15 +63,12 @@ jobs:
             -c:a aac -b:a 128k -ar 44100 \
             -f flv "$RTMP_URL" &
           ffmpeg_pid=$!
-          echo "ffmpeg avviato con il lotto iniziale (pid $ffmpeg_pid)"
 
           python download.py rest
 
-          echo "lotto completo — hot-swap di ffmpeg sulla lista intera"
           kill "$ffmpeg_pid" 2>/dev/null
           wait "$ffmpeg_pid" 2>/dev/null
 
-          # Fase 2: stesso loop di retry di sempre, ora con la lista completa
           while [ "$(date +%s)" -lt "$end_time" ]; do
             remaining=$(( end_time - $(date +%s) ))
             ffmpeg -re -stream_loop -1 \
@@ -92,7 +87,6 @@ jobs:
             if [ "$(date +%s)" -ge "$end_time" ]; then
               break
             fi
-            echo "ffmpeg terminato (codice $code) prima della fine rotazione — riconnetto tra 3s"
             sleep 3
           done
 
