@@ -232,6 +232,33 @@ def end_broadcast(yt, broadcast_id: str, stream_id: str):
         pass
 
 
+def stream_is_healthy(yt, stream_id: str) -> bool:
+    """False se lo stream YouTube e' in stato bad/noData: il broadcast va ricreato."""
+    try:
+        res = yt.liveStreams().list(part="status", id=stream_id).execute()
+        items = res.get("items", [])
+        if not items:
+            return False
+        health = items[0]["status"].get("healthStatus", {}).get("status", "noData")
+        logger.info(f"stream {stream_id}: health={health}")
+        return health in ("good", "ok")
+    except Exception:
+        return True  # in caso di errore API non forziamo la ricreazione
+
+
+def cancel_run(run_id: int):
+    """Cancella un job live su GitHub Actions (relay con stream bad)."""
+    if not run_id:
+        return
+    repo  = os.environ["GITHUB_REPOSITORY"]
+    token = os.environ["GITHUB_TOKEN"]
+    try:
+        _gh_request(repo, token, "POST", f"actions/runs/{run_id}/cancel")
+        logger.info(f"run {run_id}: cancellato")
+    except Exception as e:
+        logger.warning(f"run {run_id}: cancel fallito ({e})")
+
+
 def _gh_request(repo: str, token: str, method: str, path: str, payload: dict = None):
     url  = f"https://api.github.com/repos/{repo}/{path}"
     data = json.dumps(payload).encode("utf-8") if payload else None
@@ -303,7 +330,20 @@ def process_genre(drive, yt, root_folder_id: str, state_folder_id: str, genre: s
         - datetime.datetime.fromisoformat(last)
     ) >= CENSUS_INTERVAL
     if not due:
-        return
+        # Fuori dal ciclo normale: se lo stream e' bad, ricreazione immediata.
+        if state.get("broadcast_id") and state.get("stream_id"):
+            if not stream_is_healthy(yt, state["stream_id"]):
+                logger.warning(f"{genre}: stream bad, forzo ricreazione")
+                cancel_run(state.get("run_id"))
+                end_broadcast(yt, state["broadcast_id"], state["stream_id"])
+                state["broadcast_id"] = state["stream_id"] = state["rtmp_url"] = None
+                state["last_dispatch_at"] = None
+                write_state_file(drive, state_folder_id, f"{genre}.json", state)
+                due = True
+            else:
+                return
+        else:
+            return
 
     if len(state["pool"]) < MIN_VIDEOS_FOR_LIVE:
         all_ids = census_genre(drive, root_folder_id, genre)

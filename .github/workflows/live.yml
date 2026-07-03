@@ -17,6 +17,10 @@ on:
         type: string
         default: "290"
 
+permissions:
+  contents: read
+  actions: write
+
 jobs:
   relay:
     runs-on: ubuntu-latest
@@ -93,3 +97,9 @@ jobs:
       - name: cleanup
         if: always()
         run: rm -f sa.json
+
+      - name: re-trigger orchestrate
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh workflow run orchestrate.yml --repo pilgrimdelamare/av-relay
