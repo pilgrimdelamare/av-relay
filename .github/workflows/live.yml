@@ -91,7 +91,7 @@ jobs:
             if [ "$(date +%s)" -ge "$end_time" ]; then
               break
             fi
-            sleep 3
+            sleep 1
           done
 
       - name: cleanup
