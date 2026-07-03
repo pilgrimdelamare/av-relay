@@ -1,0 +1,40 @@
+name: orchestrate
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  orchestrate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: install deps
+        run: pip install --quiet google-api-python-client google-auth
+
+      - name: write service account key
+        run: echo '${{ secrets.GDRIVE_SA_KEY }}' > sa.json
+
+      - name: run orchestrator
+        env:
+          DRIVE_ROOT_FOLDER_ID: ${{ secrets.DRIVE_ROOT_FOLDER_ID }}
+          YT_CLIENT_ID:         ${{ secrets.YT_CLIENT_ID }}
+          YT_CLIENT_SECRET:     ${{ secrets.YT_CLIENT_SECRET }}
+          YT_REFRESH_TOKEN:     ${{ secrets.YT_REFRESH_TOKEN }}
+          GITHUB_TOKEN:         ${{ secrets.GITHUB_TOKEN }}
+        run: python orchestrate.py
+
+      - name: cleanup
+        if: always()
+        run: rm -f sa.json

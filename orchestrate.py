@@ -1,0 +1,385 @@
+"""
+orchestrate.py - Orchestratore live 24/7, 5 generi simultanei.
+Gira su schedule (vedi .github/workflows/orchestrate.yml) senza dipendere dal
+ThinkPad: censisce i brani per genere su Drive, mantiene un pool "senza
+ripetizioni fino a esaurimento", tiene vivo un broadcast YouTube persistente
+per genere, e dispaccia live.yml (stesso repo) con il nuovo lotto ogni 5h.
+
+Stato e censimento vivono su Google Drive (mai in git — questo repo deve
+restare "muto"): stesso Service Account gia' usato per il download
+(GDRIVE_SA_KEY), scope allargato a drive.readonly + drive.file.
+"""
+import datetime
+import json
+import logging
+import os
+import random
+import sys
+import time
+import urllib.error
+import urllib.request
+
+logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+logger = logging.getLogger("orchestrate")
+
+BATCH_SIZE           = 25
+MIN_VIDEOS_FOR_LIVE  = 5
+CENSUS_INTERVAL      = datetime.timedelta(hours=5)
+RELAY_DURATION_MIN   = 290   # 5h - margine, sotto il tetto di 6h/job di Actions
+STATE_FOLDER_NAME    = "_orchestrator_state"
+
+# Stessa fonte di core/config.py GENRES / LIVE_DESCRIPTIONS in majesty_music —
+# duplicato qui perche' questo repo non ha accesso a quel codice. Tenere allineato
+# a mano se i generi cambiano.
+GENRES = ["electro-swing", "rock", "pop", "k-pop", "lofi-chillout"]
+
+LIVE_DESCRIPTIONS = {
+    "electro-swing": (
+        "Non-stop Electro Swing music, 24/7 — the perfect soundtrack for aperitivo hour, "
+        "cocktail bars, speakeasy lounges, dinner parties, restaurant ambience, vintage swing "
+        "dance nights, retro parties, and stylish brunch playlists. New AI-generated songs "
+        "added daily, always fresh, always dancing between the 1920s and today.\n"
+        "#MajestyMusic #ElectroSwing #AperitivoMusic #CocktailBarMusic #SwingMusic "
+        "#LoungeMusic #PartyPlaylist #DinnerMusic #RestaurantMusic"
+    ),
+    "rock": (
+        "Non-stop Rock music, 24/7 — high-energy tracks for gym workouts, road trips, garage "
+        "sessions, house parties, studying with a beat, motorcycle rides, and driving "
+        "playlists. New AI-generated songs added daily, built to keep the energy up all day "
+        "long.\n"
+        "#MajestyMusic #RockMusic #WorkoutMusic #RoadTripPlaylist #GymMusic #DrivingMusic "
+        "#PartyRock #GarageRock"
+    ),
+    "pop": (
+        "Non-stop Pop music, 24/7 — feel-good tracks for the office, studying, running, "
+        "cooking, road trips, shopping playlists, background music for work, and everyday "
+        "good vibes. New AI-generated songs added daily, catchy and fresh around the clock.\n"
+        "#MajestyMusic #PopMusic #StudyMusic #WorkMusic #RunningPlaylist #BackgroundMusic "
+        "#FeelGoodMusic #DrivingPlaylist"
+    ),
+    "k-pop": (
+        "Non-stop K-Pop music, 24/7 — perfect for dance practice, gaming sessions, study "
+        "breaks, workout playlists, parties, and aesthetic vlog background music. New "
+        "AI-generated songs added daily, bilingual Korean-English titles, always fresh "
+        "energy.\n"
+        "#MajestyMusic #KPop #DancePractice #StudyWithMe #GamingMusic #WorkoutPlaylist "
+        "#KPopPlaylist #AestheticMusic"
+    ),
+    "lofi-chillout": (
+        "Non-stop Lofi Chillout music, 24/7 — calm beats for studying, working, focusing, "
+        "relaxing, sleeping, rainy days, coffee shop vibes, and late-night unwinding. New "
+        "AI-generated songs added daily, smooth and endless chill.\n"
+        "#MajestyMusic #LofiHipHop #StudyMusic #ChillBeats #RelaxMusic #SleepMusic "
+        "#FocusMusic #CafeMusic"
+    ),
+}
+
+
+# ── Drive ─────────────────────────────────────────────────────────────────
+
+def get_drive_service():
+    from google.oauth2.service_account import Credentials
+    from googleapiclient.discovery import build
+    creds = Credentials.from_service_account_file(
+        "sa.json",
+        scopes=[
+            "https://www.googleapis.com/auth/drive.readonly",
+            "https://www.googleapis.com/auth/drive.file",
+        ],
+    )
+    return build("drive", "v3", credentials=creds)
+
+
+def _list_children(drive, parent_id: str, mime_type: str = None) -> list[dict]:
+    q = f"'{parent_id}' in parents and trashed=false"
+    if mime_type:
+        q += f" and mimeType='{mime_type}'"
+    items, token = [], None
+    while True:
+        res = drive.files().list(
+            q=q, fields="nextPageToken, files(id, name)",
+            pageToken=token, pageSize=200,
+        ).execute()
+        items.extend(res.get("files", []))
+        token = res.get("nextPageToken")
+        if not token:
+            break
+    return items
+
+
+def find_folder(drive, name: str, parent_id: str) -> str | None:
+    q = (
+        f"name='{name}' and mimeType='application/vnd.google-apps.folder' "
+        f"and trashed=false and '{parent_id}' in parents"
+    )
+    res = drive.files().list(q=q, fields="files(id)").execute()
+    files = res.get("files", [])
+    return files[0]["id"] if files else None
+
+
+def get_or_create_state_folder(drive, root_folder_id: str) -> str:
+    existing = find_folder(drive, STATE_FOLDER_NAME, root_folder_id)
+    if existing:
+        return existing
+    meta = {
+        "name": STATE_FOLDER_NAME,
+        "mimeType": "application/vnd.google-apps.folder",
+        "parents": [root_folder_id],
+    }
+    return drive.files().create(body=meta, fields="id").execute()["id"]
+
+
+def census_genre(drive, root_folder_id: str, genre: str) -> list[str]:
+    """Elenca gli ID Drive di tutti i video caricati per un genere:
+    <root>/<genere>/<data>/*.mp4 (traversal a 2 livelli, paginato)."""
+    genre_folder_id = find_folder(drive, genre, root_folder_id)
+    if not genre_folder_id:
+        return []
+    video_ids = []
+    for date_folder in _list_children(drive, genre_folder_id, "application/vnd.google-apps.folder"):
+        for f in _list_children(drive, date_folder["id"], "video/mp4"):
+            video_ids.append(f["id"])
+    return video_ids
+
+
+def read_state_file(drive, folder_id: str, filename: str) -> dict | None:
+    res = drive.files().list(
+        q=f"name='{filename}' and trashed=false and '{folder_id}' in parents",
+        fields="files(id)",
+    ).execute()
+    files = res.get("files", [])
+    if not files:
+        return None
+    raw = drive.files().get_media(fileId=files[0]["id"]).execute()
+    return json.loads(raw)
+
+
+def write_state_file(drive, folder_id: str, filename: str, data: dict):
+    from googleapiclient.http import MediaInMemoryUpload
+    media = MediaInMemoryUpload(json.dumps(data, indent=2).encode("utf-8"), mimetype="application/json")
+    res = drive.files().list(
+        q=f"name='{filename}' and trashed=false and '{folder_id}' in parents",
+        fields="files(id)",
+    ).execute()
+    files = res.get("files", [])
+    if files:
+        drive.files().update(fileId=files[0]["id"], media_body=media).execute()
+    else:
+        meta = {"name": filename, "parents": [folder_id]}
+        drive.files().create(body=meta, media_body=media, fields="id").execute()
+
+
+# ── YouTube ───────────────────────────────────────────────────────────────
+
+def get_youtube_service():
+    from google.oauth2.credentials import Credentials
+    from googleapiclient.discovery import build
+    creds = Credentials(
+        token=None,
+        refresh_token=os.environ["YT_REFRESH_TOKEN"],
+        client_id=os.environ["YT_CLIENT_ID"],
+        client_secret=os.environ["YT_CLIENT_SECRET"],
+        token_uri="https://oauth2.googleapis.com/token",
+        scopes=["https://www.googleapis.com/auth/youtube"],
+    )
+    return build("youtube", "v3", credentials=creds)
+
+
+def create_persistent_broadcast(yt, genre: str) -> tuple | None:
+    """Broadcast persistente: enableAutoStop=False, non va chiuso da solo su
+    un buco RTMP transitorio durante l'handoff tra un job di relay e il successivo."""
+    try:
+        scheduled = (
+            datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=60)
+        ).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        title = f"Majesty Music — {genre.title()} \U0001f3b5 Live 24/7"
+
+        broadcast = yt.liveBroadcasts().insert(
+            part="snippet,status,contentDetails",
+            body={
+                "snippet": {
+                    "title": title[:100],
+                    "description": LIVE_DESCRIPTIONS.get(genre, f"Non-stop {genre} music, 24/7."),
+                    "scheduledStartTime": scheduled,
+                },
+                "status": {"privacyStatus": "public", "selfDeclaredMadeForKids": False},
+                "contentDetails": {
+                    "enableAutoStart": True,
+                    "enableAutoStop": False,
+                    "latencyPreference": "normal",
+                    "enableDvr": False,
+                },
+            },
+        ).execute()
+        broadcast_id = broadcast["id"]
+
+        stream = yt.liveStreams().insert(
+            part="snippet,cdn",
+            body={
+                "snippet": {"title": title[:100]},
+                "cdn": {"frameRate": "30fps", "ingestionType": "rtmp", "resolution": "1080p"},
+            },
+        ).execute()
+        stream_id = stream["id"]
+        ingest    = stream["cdn"]["ingestionInfo"]
+        rtmp_url  = f"{ingest['ingestionAddress']}/{ingest['streamName']}"
+
+        yt.liveBroadcasts().bind(part="id,contentDetails", id=broadcast_id, streamId=stream_id).execute()
+        logger.info(f"[{genre}] broadcast persistente creato: {broadcast_id}")
+        return broadcast_id, stream_id, rtmp_url
+    except Exception as e:
+        logger.error(f"[{genre}] create_persistent_broadcast fallito: {e}")
+        return None
+
+
+def broadcast_is_alive(yt, broadcast_id: str) -> bool:
+    try:
+        res = yt.liveBroadcasts().list(part="status", id=broadcast_id).execute()
+        items = res.get("items", [])
+        if not items:
+            return False
+        return items[0]["status"]["lifeCycleStatus"] not in ("complete", "revoked")
+    except Exception as e:
+        logger.warning(f"broadcast_is_alive fallito per {broadcast_id}: {e}")
+        return False
+
+
+def end_broadcast(yt, broadcast_id: str, stream_id: str):
+    try:
+        yt.liveBroadcasts().transition(broadcastStatus="complete", id=broadcast_id, part="status").execute()
+    except Exception as e:
+        logger.warning(f"end_broadcast (transition) fallito: {e}")
+    try:
+        yt.liveStreams().delete(id=stream_id).execute()
+    except Exception as e:
+        logger.warning(f"end_broadcast (delete stream) fallito: {e}")
+
+
+# ── GitHub (dispatch live.yml, stesso repo) ─────────────────────────────────
+
+def _gh_request(repo: str, token: str, method: str, path: str, payload: dict = None):
+    url  = f"https://api.github.com/repos/{repo}/{path}"
+    data = json.dumps(payload).encode("utf-8") if payload else None
+    req  = urllib.request.Request(
+        url, data=data,
+        headers={
+            "Authorization":        f"Bearer {token}",
+            "Accept":               "application/vnd.github+json",
+            "Content-Type":         "application/json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+        method=method,
+    )
+    with urllib.request.urlopen(req, timeout=30) as r:
+        return json.load(r) if r.length != 0 else {}
+
+
+def dispatch_relay(genre: str, video_ids: list[str], rtmp_url: str, duration_minutes: int) -> int | None:
+    repo  = os.environ["GITHUB_REPOSITORY"]
+    token = os.environ["GITHUB_TOKEN"]
+    ts_before = time.time()
+    try:
+        _gh_request(repo, token, "POST", "actions/workflows/live.yml/dispatches", {
+            "ref": "main",
+            "inputs": {
+                "genre":            genre,
+                "video_ids":        json.dumps(video_ids),
+                "rtmp_url":         rtmp_url,
+                "duration_minutes": str(duration_minutes),
+            },
+        })
+    except urllib.error.HTTPError as e:
+        logger.error(f"[{genre}] dispatch live.yml HTTP {e.code}: {e.read()[:200]}")
+        return None
+
+    for _ in range(10):
+        time.sleep(3)
+        try:
+            runs = _gh_request(repo, token, "GET", "actions/workflows/live.yml/runs?per_page=5")
+            for run in runs.get("workflow_runs", []):
+                created_ts = datetime.datetime.fromisoformat(
+                    run.get("created_at", "").replace("Z", "+00:00")
+                ).timestamp()
+                if created_ts >= ts_before - 5:
+                    return run["id"]
+        except Exception:
+            pass
+    logger.error(f"[{genre}] impossibile trovare il run live.yml appena dispacciato")
+    return None
+
+
+# ── Orchestrazione per genere ────────────────────────────────────────────
+
+def process_genre(drive, yt, root_folder_id: str, state_folder_id: str, genre: str, control: dict):
+    state = read_state_file(drive, state_folder_id, f"{genre}.json") or {
+        "cycle": 0, "pool": [], "last_dispatch_at": None,
+        "broadcast_id": None, "stream_id": None, "rtmp_url": None, "run_id": None,
+    }
+
+    enabled = control.get(genre, True)
+    if not enabled:
+        if state.get("broadcast_id"):
+            logger.info(f"[{genre}] disabilitato — chiudo il broadcast persistente")
+            end_broadcast(yt, state["broadcast_id"], state["stream_id"])
+            state["broadcast_id"] = state["stream_id"] = state["rtmp_url"] = None
+            write_state_file(drive, state_folder_id, f"{genre}.json", state)
+        else:
+            logger.info(f"[{genre}] disabilitato — nessuna azione")
+        return
+
+    last = state.get("last_dispatch_at")
+    due = last is None or (
+        datetime.datetime.now(datetime.timezone.utc)
+        - datetime.datetime.fromisoformat(last)
+    ) >= CENSUS_INTERVAL
+    if not due:
+        logger.info(f"[{genre}] non ancora dovuto un nuovo censimento")
+        return
+
+    if len(state["pool"]) < MIN_VIDEOS_FOR_LIVE:
+        all_ids = census_genre(drive, root_folder_id, genre)
+        if len(all_ids) < MIN_VIDEOS_FOR_LIVE:
+            logger.warning(f"[{genre}] solo {len(all_ids)} video su Drive — minimo {MIN_VIDEOS_FOR_LIVE}, salto")
+            return
+        random.shuffle(all_ids)
+        state["pool"]  = all_ids
+        state["cycle"] = state.get("cycle", 0) + 1
+        logger.info(f"[{genre}] nuovo ciclo #{state['cycle']}: {len(all_ids)} video censiti")
+
+    batch, state["pool"] = state["pool"][:BATCH_SIZE], state["pool"][BATCH_SIZE:]
+
+    if not state.get("broadcast_id") or not broadcast_is_alive(yt, state["broadcast_id"]):
+        result = create_persistent_broadcast(yt, genre)
+        if not result:
+            logger.error(f"[{genre}] impossibile creare il broadcast — riprovo al prossimo giro")
+            return
+        state["broadcast_id"], state["stream_id"], state["rtmp_url"] = result
+
+    run_id = dispatch_relay(genre, batch, state["rtmp_url"], RELAY_DURATION_MIN)
+    if not run_id:
+        logger.error(f"[{genre}] dispatch live.yml fallito — riprovo al prossimo giro")
+        return
+
+    state["run_id"] = run_id
+    state["last_dispatch_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    write_state_file(drive, state_folder_id, f"{genre}.json", state)
+    logger.info(f"[{genre}] dispacciato run={run_id} con {len(batch)} video")
+
+
+def main():
+    root_folder_id = os.environ["DRIVE_ROOT_FOLDER_ID"]
+    drive = get_drive_service()
+    yt    = get_youtube_service()
+
+    state_folder_id = get_or_create_state_folder(drive, root_folder_id)
+    control = read_state_file(drive, state_folder_id, "live_control.json") or {}
+
+    for genre in GENRES:
+        try:
+            process_genre(drive, yt, root_folder_id, state_folder_id, genre, control)
+        except Exception as e:
+            logger.error(f"[{genre}] errore non gestito: {e}")
+
+
+if __name__ == "__main__":
+    main()
