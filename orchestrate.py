@@ -61,14 +61,15 @@ LIVE_DESCRIPTIONS = {
 
 
 def get_drive_service():
-    from google.oauth2.service_account import Credentials
+    from google.oauth2.credentials import Credentials
     from googleapiclient.discovery import build
-    creds = Credentials.from_service_account_file(
-        "sa.json",
-        scopes=[
-            "https://www.googleapis.com/auth/drive.readonly",
-            "https://www.googleapis.com/auth/drive.file",
-        ],
+    creds = Credentials(
+        token=None,
+        refresh_token=os.environ["DRIVE_REFRESH_TOKEN"],
+        client_id=os.environ["DRIVE_CLIENT_ID"],
+        client_secret=os.environ["DRIVE_CLIENT_SECRET"],
+        token_uri="https://oauth2.googleapis.com/token",
+        scopes=["https://www.googleapis.com/auth/drive.file"],
     )
     return build("drive", "v3", credentials=creds)
 

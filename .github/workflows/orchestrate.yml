@@ -23,18 +23,14 @@ jobs:
       - name: setup
         run: pip install --quiet google-api-python-client google-auth
 
-      - name: auth
-        run: echo '${{ secrets.GDRIVE_SA_KEY }}' > sa.json
-
       - name: run
         env:
           DRIVE_ROOT_FOLDER_ID: ${{ secrets.DRIVE_ROOT_FOLDER_ID }}
+          DRIVE_CLIENT_ID:      ${{ secrets.DRIVE_CLIENT_ID }}
+          DRIVE_CLIENT_SECRET:  ${{ secrets.DRIVE_CLIENT_SECRET }}
+          DRIVE_REFRESH_TOKEN:  ${{ secrets.DRIVE_REFRESH_TOKEN }}
           YT_CLIENT_ID:         ${{ secrets.YT_CLIENT_ID }}
           YT_CLIENT_SECRET:     ${{ secrets.YT_CLIENT_SECRET }}
           YT_REFRESH_TOKEN:     ${{ secrets.YT_REFRESH_TOKEN }}
           GITHUB_TOKEN:         ${{ secrets.GITHUB_TOKEN }}
         run: python orchestrate.py
-
-      - name: cleanup
-        if: always()
-        run: rm -f sa.json
