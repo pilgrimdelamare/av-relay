@@ -241,7 +241,8 @@ def stream_is_healthy(yt, stream_id: str) -> bool:
             return False
         health = items[0]["status"].get("healthStatus", {}).get("status", "noData")
         logger.info(f"stream {stream_id}: health={health}")
-        return health in ("good", "ok")
+        # noData = stream appena creato, in warmup — non forzare ricreazione
+        return health != "bad"
     except Exception:
         return True  # in caso di errore API non forziamo la ricreazione
 
