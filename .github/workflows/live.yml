@@ -70,13 +70,17 @@ jobs:
 
           python download.py rest
 
+          ffmpeg -f concat -safe 0 -i concat.txt -c copy merged.mp4 &
+          merge_pid=$!
+          wait $merge_pid
+
           kill "$ffmpeg_pid" 2>/dev/null
           wait "$ffmpeg_pid" 2>/dev/null
 
           while [ "$(date +%s)" -lt "$end_time" ]; do
             remaining=$(( end_time - $(date +%s) ))
             ffmpeg -re -stream_loop -1 \
-              -f concat -safe 0 -i concat.txt \
+              -i merged.mp4 \
               -c:v libx264 -preset veryfast \
               -b:v 2000k -maxrate 2000k -bufsize 2000k \
               -pix_fmt yuv420p -g 50 -keyint_min 50 -bf 0 \
