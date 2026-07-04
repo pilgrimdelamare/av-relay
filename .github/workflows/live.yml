@@ -56,6 +56,7 @@ jobs:
           RTMP_URL:         ${{ inputs.rtmp_url }}
           DURATION_MINUTES: ${{ inputs.duration_minutes }}
           START_AT:         ${{ inputs.start_at }}
+          GH_TOKEN:         ${{ secrets.GITHUB_TOKEN }}
         run: |
           set +e
 
@@ -68,14 +69,21 @@ jobs:
             -af aresample=async=1:first_pts=0 -c:a aac -b:a 128k -ar 44100 \
             merged.mp4
 
-          # Handoff dal job precedente: il download+merge sopra e' gia' fatto in anticipo,
-          # ora si aspetta l'istante esatto in cui il job corrente smette di pushare
-          # (mai overlap, mai buco: START_AT e' calcolato dall'orchestratore).
           while [ "$(date +%s)" -lt "$START_AT" ]; do
             sleep 5
           done
 
           end_time=$(( START_AT + DURATION_MINUTES * 60 ))
+
+          (
+            trigger_time=$(( end_time - 40 * 60 ))
+            now=$(date +%s)
+            if [ "$trigger_time" -gt "$now" ]; then
+              sleep $(( trigger_time - now ))
+            fi
+            gh workflow run orchestrate.yml --repo pilgrimdelamare/av-relay
+          ) &
+          mid_pid=$!
 
           while [ "$(date +%s)" -lt "$end_time" ]; do
             remaining=$(( end_time - $(date +%s) ))
@@ -107,6 +115,8 @@ jobs:
             fi
             sleep 1
           done
+
+          kill "$mid_pid" 2>/dev/null
 
       - name: cleanup
         if: always()
