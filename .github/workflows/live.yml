@@ -46,39 +46,24 @@ jobs:
       - name: fetch
         env:
           VIDEO_IDS: ${{ inputs.video_ids }}
-          FIRST_N: "5"
-        run: python download.py first
+        run: python download.py
 
       - name: run
         env:
-          VIDEO_IDS:        ${{ inputs.video_ids }}
-          FIRST_N:          "5"
           RTMP_URL:         ${{ inputs.rtmp_url }}
           DURATION_MINUTES: ${{ inputs.duration_minutes }}
         run: |
           set +e
           end_time=$(( $(date +%s) + DURATION_MINUTES * 60 ))
 
-          ffmpeg -re -stream_loop -1 \
-            -f concat -safe 0 -i concat.txt \
-            -c:v libx264 -preset veryfast \
-            -b:v 2000k -maxrate 2000k -bufsize 2000k \
-            -pix_fmt yuv420p -g 50 -keyint_min 50 -bf 0 \
-            -c:a aac -b:a 128k -ar 44100 -af aresample=async=1 \
-            -f flv "$RTMP_URL" &
-          ffmpeg_pid=$!
-
-          python download.py rest
-
-          ls -1 videos/*.mp4 | sort | tail -n +"$((FIRST_N + 1))" | \
+          ls -1 videos/*.mp4 | sort | \
             while IFS= read -r f; do echo "file '$f'"; done > merge_list.txt
-          ffmpeg -avoid_negative_ts make_zero -f concat -safe 0 -i merge_list.txt \
-            -c copy merged.mp4 &
-          merge_pid=$!
-          wait $merge_pid
-
-          kill "$ffmpeg_pid" 2>/dev/null
-          wait "$ffmpeg_pid" 2>/dev/null
+          ffmpeg -f concat -safe 0 -i merge_list.txt \
+            -vsync cfr -r 25 \
+            -c:v libx264 -preset veryfast -b:v 2000k -maxrate 2000k -bufsize 2000k \
+            -pix_fmt yuv420p -g 50 -keyint_min 50 -bf 0 \
+            -af aresample=async=1:first_pts=0 -c:a aac -b:a 128k -ar 44100 \
+            merged.mp4
 
           while [ "$(date +%s)" -lt "$end_time" ]; do
             remaining=$(( end_time - $(date +%s) ))

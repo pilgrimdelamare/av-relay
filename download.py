@@ -16,6 +16,44 @@ def get_service():
     return build("drive", "v3", credentials=creds)
 
 
+def get_pix_fmt(path: str) -> str | None:
+    import subprocess
+    try:
+        r = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=pix_fmt",
+             "-of", "default=noprint_wrappers=1:nokey=1", path],
+            capture_output=True, text=True, timeout=10,
+        )
+        return r.stdout.strip() or None
+    except Exception:
+        return None
+
+
+def normalize_pix_fmt(path: str) -> None:
+    """Legacy electro-swing renders used yuvj420p (full-range). Re-encode those
+    to yuv420p (limited-range) so every source feeds the concat/merge steps
+    with the same color range and avoids the encoder bitrate bursts that
+    yuvj420p causes downstream."""
+    import subprocess
+    pix_fmt = get_pix_fmt(path)
+    if not pix_fmt or not pix_fmt.startswith("yuvj"):
+        return
+    tmp = path + ".norm.mp4"
+    try:
+        subprocess.run(
+            ["ffmpeg", "-y", "-i", path,
+             "-vf", "scale=in_range=full:out_range=tv,format=yuv420p",
+             "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+             "-c:a", "copy", tmp],
+            capture_output=True, timeout=120, check=True,
+        )
+        os.replace(tmp, path)
+    except Exception:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+
+
 def download_one(file_id: str, index: int) -> str:
     svc  = get_service()
     path = os.path.join(OUT_DIR, f"{index:04d}.mp4")
@@ -25,6 +63,7 @@ def download_one(file_id: str, index: int) -> str:
         done = False
         while not done:
             _, done = downloader.next_chunk()
+    normalize_pix_fmt(path)
     return path
 
 
@@ -63,41 +102,13 @@ def write_concat(paths: list[str]):
                 f.write(f"duration {dur:.6f}\n")
 
 
-def rebuild_concat_from_dir() -> list[str]:
-    paths = sorted(
-        os.path.join(OUT_DIR, name) for name in os.listdir(OUT_DIR) if name.endswith(".mp4")
-    )
-    write_concat(paths)
-    return paths
-
-
 def main():
-    phase     = sys.argv[1] if len(sys.argv) > 1 else "all"
     video_ids = json.loads(os.environ["VIDEO_IDS"])
-    first_n   = int(os.environ.get("FIRST_N", "5"))
     os.makedirs(OUT_DIR, exist_ok=True)
-
-    if phase == "first":
-        batch = video_ids[:first_n]
-        if not batch:
-            sys.exit(1)
-        paths = download_batch(batch, 0)
-        if not paths:
-            sys.exit(1)
-        write_concat(paths)
-
-    elif phase == "rest":
-        rest = video_ids[first_n:]
-        if rest:
-            download_batch(rest, first_n)
-        if not rebuild_concat_from_dir():
-            sys.exit(1)
-
-    else:
-        paths = download_batch(video_ids, 0)
-        if not paths:
-            sys.exit(1)
-        write_concat(paths)
+    paths = download_batch(video_ids, 0)
+    if not paths:
+        sys.exit(1)
+    write_concat(paths)
 
 
 if __name__ == "__main__":
