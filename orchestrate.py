@@ -13,8 +13,8 @@ logger = logging.getLogger("orchestrate")
 BATCH_SIZE          = 25
 MIN_VIDEOS_FOR_LIVE = 5
 RELAY_DURATION_MIN  = 290
-PREP_LEAD_MIN       = 40   # quanto prima della fine del job corrente si pre-carica il prossimo
-HANDOFF_BUFFER_S    = 5    # margine tra la fine del job corrente e l'inizio del successivo (mai in overlap sull'RTMP)
+PREP_LEAD_MIN       = 40
+HANDOFF_BUFFER_S    = 5
 STATE_FOLDER_NAME   = "_orchestrator_state"
 
 GENRES = ["electro-swing", "rock", "pop", "k-pop", "lofi-chillout"]
@@ -171,7 +171,7 @@ def create_persistent_broadcast(yt, genre: str) -> tuple | None:
         scheduled = (
             datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=60)
         ).strftime("%Y-%m-%dT%H:%M:%S.000Z")
-        title = f"Majesty Music — {genre.title()} \U0001f3b5 Live 24/7"
+        title = f"Majesty Music \u2014 {genre.title()} \U0001f3b5 Live 24/7"
 
         broadcast = yt.liveBroadcasts().insert(
             part="snippet,status,contentDetails",
@@ -234,7 +234,7 @@ def end_broadcast(yt, broadcast_id: str, stream_id: str):
 
 
 def stream_is_healthy(yt, stream_id: str) -> bool:
-    """False se lo stream YouTube e' in stato bad/noData: il broadcast va ricreato."""
+    """False se lo stream YouTube e' in stato bad: il broadcast va ricreato."""
     try:
         res = yt.liveStreams().list(part="status", id=stream_id).execute()
         items = res.get("items", [])
@@ -242,15 +242,14 @@ def stream_is_healthy(yt, stream_id: str) -> bool:
             return False
         health = items[0]["status"].get("healthStatus", {}).get("status", "noData")
         logger.info(f"stream {stream_id}: health={health}")
-        # noData = stream appena creato, in warmup — non forzare ricreazione
         return health != "bad"
     except Exception:
-        return True  # in caso di errore API non forziamo la ricreazione
+        return True
 
 
-def cancel_run(run_id: int):
-    """Cancella un job live su GitHub Actions (relay con stream bad)."""
-    if not run_id:
+def cancel_run(run_id):
+    """Cancella un job live su GitHub Actions."""
+    if not run_id or run_id == "pending":
         return
     repo  = os.environ["GITHUB_REPOSITORY"]
     token = os.environ["GITHUB_TOKEN"]
@@ -328,7 +327,7 @@ def _pick_batch(drive, root_folder_id: str, genre: str, state: dict) -> list[str
 
 def _dispatch_fresh(drive, yt, root_folder_id: str, state_folder_id: str, genre: str, state: dict,
                      start_at: datetime.datetime):
-    """Dispatcha un job che diventa 'corrente' subito (nessun handoff in corso)."""
+    """Dispatcha un job che diventa corrente subito (nessun handoff in corso)."""
     batch = _pick_batch(drive, root_folder_id, genre, state)
     if batch is None:
         return
@@ -349,18 +348,25 @@ def _dispatch_fresh(drive, yt, root_folder_id: str, state_folder_id: str, genre:
 
 def _dispatch_next(drive, root_folder_id: str, state_folder_id: str, genre: str, state: dict,
                     start_at: datetime.datetime):
-    """Pre-carica (download+merge) il prossimo lotto in un job separato che aspetta start_at
-    prima di aprire il push RTMP — cosi' non c'e' mai un buco tra un job e l'altro."""
+    """Pre-carica il prossimo lotto. Scrive un marker 'pending' su Drive PRIMA del dispatch
+    per evitare doppi invii se orchestrate viene interrotto tra dispatch e scrittura run_id."""
     if not state.get("rtmp_url"):
         return
     batch = _pick_batch(drive, root_folder_id, genre, state)
     if batch is None:
         return
+
+    state["next_run_id"]   = "pending"
+    state["next_start_at"] = start_at.isoformat()
+    write_state_file(drive, state_folder_id, f"{genre}.json", state)
+
     run_id = dispatch_relay(genre, batch, state["rtmp_url"], RELAY_DURATION_MIN, start_at.timestamp())
     if not run_id:
+        state["next_run_id"]   = None
+        state["next_start_at"] = None
+        write_state_file(drive, state_folder_id, f"{genre}.json", state)
         return
-    state["next_run_id"]   = run_id
-    state["next_start_at"] = start_at.isoformat()
+    state["next_run_id"] = run_id
     write_state_file(drive, state_folder_id, f"{genre}.json", state)
     logger.info(f"{genre}: prep ok {len(batch)}, start_at={start_at.isoformat()}")
 
@@ -387,10 +393,12 @@ def process_genre(drive, yt, root_folder_id: str, state_folder_id: str, genre: s
 
     now = datetime.datetime.now(datetime.timezone.utc)
 
-    # C'e' gia' un prossimo job pre-caricato in attesa: se e' arrivato il suo istante di
-    # handoff, promuovilo a "corrente". In ogni caso non fare altro in questo giro (evita
-    # doppie pre-dispatch mentre un handoff e' gia' in volo).
     if state.get("next_run_id") and state.get("next_start_at"):
+        if state["next_run_id"] == "pending":
+            # Dispatch precedente interrotto prima di ricevere il run_id reale:
+            # non ri-dispatchare (rischierebbe doppio stream), aspetta il prossimo run.
+            logger.info(f"{genre}: next dispatch pending, skip")
+            return
         next_start = datetime.datetime.fromisoformat(state["next_start_at"])
         if now >= next_start:
             state["run_id"]           = state["next_run_id"]
@@ -403,15 +411,12 @@ def process_genre(drive, yt, root_folder_id: str, state_folder_id: str, genre: s
 
     last = state.get("last_dispatch_at")
 
-    # Primissimo avvio per questo genere: dispatch immediato.
     if last is None:
         _dispatch_fresh(drive, yt, root_folder_id, state_folder_id, genre, state, start_at=now)
         return
 
     current_end = datetime.datetime.fromisoformat(last) + datetime.timedelta(minutes=RELAY_DURATION_MIN)
 
-    # Stream YouTube in stato bad: reset immediato, cancella sia il job corrente sia
-    # un eventuale prep in corso (punterebbe a un broadcast che stiamo per distruggere).
     if state.get("broadcast_id") and state.get("stream_id"):
         if not stream_is_healthy(yt, state["stream_id"]):
             logger.warning(f"{genre}: stream bad, forzo ricreazione")
@@ -423,9 +428,6 @@ def process_genre(drive, yt, root_folder_id: str, state_folder_id: str, genre: s
             _dispatch_fresh(drive, yt, root_folder_id, state_folder_id, genre, state, start_at=now)
             return
 
-    # In prossimita' della fine del job corrente: pre-carica il prossimo lotto (download+merge)
-    # senza toccare il job che sta ancora andando in onda. Il nuovo job aspettera' da solo
-    # l'istante esatto di handoff prima di aprire il push RTMP.
     if now >= current_end - datetime.timedelta(minutes=PREP_LEAD_MIN):
         start_at = current_end + datetime.timedelta(seconds=HANDOFF_BUFFER_S)
         _dispatch_next(drive, root_folder_id, state_folder_id, genre, state, start_at=start_at)
