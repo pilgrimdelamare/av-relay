@@ -260,6 +260,31 @@ def cancel_run(run_id):
         logger.warning(f"run {run_id}: cancel fallito ({e})")
 
 
+def run_is_alive(run_id) -> bool:
+    """False se il job GitHub Actions e' terminato con failure/cancel/timeout o non trovato.
+    Conservativo su errori API transitori (ritorna True per non triggerare ricreazioni spurie)."""
+    if not run_id or run_id == "pending":
+        return True
+    repo  = os.environ.get("GITHUB_REPOSITORY", "")
+    token = os.environ.get("GITHUB_TOKEN", "")
+    if not repo or not token:
+        return True
+    try:
+        run        = _gh_request(repo, token, "GET", f"actions/runs/{run_id}")
+        status     = run.get("status", "")
+        conclusion = run.get("conclusion", "")
+        if status == "completed" and conclusion in ("cancelled", "failure", "timed_out"):
+            logger.info(f"run {run_id}: {status}/{conclusion}")
+            return False
+        return True
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return False
+        return True
+    except Exception:
+        return True
+
+
 def _gh_request(repo: str, token: str, method: str, path: str, payload: dict = None):
     url  = f"https://api.github.com/repos/{repo}/{path}"
     data = json.dumps(payload).encode("utf-8") if payload else None
@@ -416,6 +441,16 @@ def process_genre(drive, yt, root_folder_id: str, state_folder_id: str, genre: s
         return
 
     current_end = datetime.datetime.fromisoformat(last) + datetime.timedelta(minutes=RELAY_DURATION_MIN)
+
+    if state.get("run_id") and not run_is_alive(state["run_id"]):
+        logger.warning(f"{genre}: run {state['run_id']} morto, forzo ricreazione")
+        cancel_run(state.get("next_run_id"))
+        if state.get("broadcast_id") and state.get("stream_id"):
+            end_broadcast(yt, state["broadcast_id"], state["stream_id"])
+        state["broadcast_id"] = state["stream_id"] = state["rtmp_url"] = None
+        state["run_id"] = state["next_run_id"] = state["next_start_at"] = None
+        _dispatch_fresh(drive, yt, root_folder_id, state_folder_id, genre, state, start_at=now)
+        return
 
     if state.get("broadcast_id") and state.get("stream_id"):
         if not stream_is_healthy(yt, state["stream_id"]):
