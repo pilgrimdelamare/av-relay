@@ -64,9 +64,9 @@ jobs:
             while IFS= read -r f; do echo "file '$f'"; done > merge_list.txt
           ffmpeg -f concat -safe 0 -i merge_list.txt \
             -vsync cfr -r 25 \
-            -c:v libx264 -preset veryfast -b:v 2000k -maxrate 2000k -bufsize 2000k \
+            -c:v libx264 -preset veryfast -b:v 4500k -maxrate 5500k -bufsize 11000k \
             -pix_fmt yuv420p -g 50 -keyint_min 50 -bf 0 \
-            -af aresample=async=1:first_pts=0 -c:a aac -b:a 128k -ar 44100 \
+            -c:a aac -b:a 192k -ar 44100 -ac 2 \
             merged.mp4
 
           while [ "$(date +%s)" -lt "$START_AT" ]; do
@@ -91,17 +91,17 @@ jobs:
               ffmpeg -re -stream_loop -1 \
                 -i merged.mp4 \
                 -c:v libx264 -preset veryfast \
-                -b:v 2000k -maxrate 2000k -bufsize 2000k \
+                -b:v 4500k -maxrate 5500k -bufsize 11000k \
                 -pix_fmt yuv420p -g 50 -keyint_min 50 -bf 0 \
-                -c:a aac -b:a 128k -ar 44100 \
+                -c:a aac -b:a 192k -ar 44100 \
                 -f flv "$RTMP_URL" &
             else
               ffmpeg -re -stream_loop -1 \
                 -f concat -safe 0 -i concat.txt \
                 -c:v libx264 -preset veryfast \
-                -b:v 2000k -maxrate 2000k -bufsize 2000k \
+                -b:v 4500k -maxrate 5500k -bufsize 11000k \
                 -pix_fmt yuv420p -g 50 -keyint_min 50 -bf 0 \
-                -c:a aac -b:a 128k -ar 44100 -af aresample=async=1 \
+                -c:a aac -b:a 192k -ar 44100 -af aresample=async=1 \
                 -f flv "$RTMP_URL" &
             fi
             pid=$!
