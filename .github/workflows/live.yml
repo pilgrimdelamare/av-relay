@@ -85,6 +85,15 @@ jobs:
           ) &
           mid_pid=$!
 
+          (
+            while [ "$(date +%s)" -lt "$end_time" ]; do
+              sleep 1200
+              [ "$(date +%s)" -lt "$end_time" ] && \
+                gh workflow run orchestrate.yml --repo pilgrimdelamare/av-relay 2>/dev/null || true
+            done
+          ) &
+          periodic_pid=$!
+
           while [ "$(date +%s)" -lt "$end_time" ]; do
             remaining=$(( end_time - $(date +%s) ))
             if [ -s merged.mp4 ]; then
@@ -117,6 +126,7 @@ jobs:
           done
 
           kill "$mid_pid" 2>/dev/null
+          kill "$periodic_pid" 2>/dev/null
 
       - name: cleanup
         if: always()
