@@ -99,10 +99,7 @@ jobs:
             if [ -s merged.mp4 ]; then
               ffmpeg -re -stream_loop -1 \
                 -i merged.mp4 \
-                -c:v libx264 -preset veryfast \
-                -b:v 4500k -maxrate 5500k -bufsize 11000k \
-                -pix_fmt yuv420p -g 50 -keyint_min 50 -bf 0 \
-                -c:a aac -b:a 192k -ar 44100 \
+                -c copy \
                 -f flv "$RTMP_URL" &
             else
               ffmpeg -re -stream_loop -1 \
