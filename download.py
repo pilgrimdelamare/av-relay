@@ -69,19 +69,23 @@ def download_one(file_id: str, index: int) -> str:
 
 def download_batch(ids: list[str], start_index: int, max_workers: int = 5) -> list[str]:
     # Timeout globale: se dopo 300s non tutti i download sono completati,
-    # procedi con quelli gia' finiti (evita che un file stale/corrotto blocchi il job).
+    # procedi con quelli gia' finiti. NOTA: non usare 'with' — il context manager
+    # chiama shutdown(wait=True) che blocca ugualmente sul thread in stallo.
+    # shutdown(wait=False, cancel_futures=True) restituisce immediatamente.
     paths = [None] * len(ids)
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as ex:
-        futures = {ex.submit(download_one, fid, start_index + i): i for i, fid in enumerate(ids)}
-        try:
-            for fut in concurrent.futures.as_completed(futures, timeout=300):
-                i = futures[fut]
-                try:
-                    paths[i] = fut.result()
-                except Exception:
-                    pass
-        except concurrent.futures.TimeoutError:
-            pass  # procedi con i video gia' scaricati
+    ex = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
+    futures = {ex.submit(download_one, fid, start_index + i): i for i, fid in enumerate(ids)}
+    try:
+        for fut in concurrent.futures.as_completed(futures, timeout=300):
+            i = futures[fut]
+            try:
+                paths[i] = fut.result()
+            except Exception:
+                pass
+    except concurrent.futures.TimeoutError:
+        pass  # procedi con i video gia' scaricati
+    finally:
+        ex.shutdown(wait=False, cancel_futures=True)
     return [p for p in paths if p]
 
 
