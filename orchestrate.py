@@ -445,9 +445,10 @@ def process_genre(drive, yt, root_folder_id: str, state_folder_id: str, genre: s
     if state.get("run_id") and not run_is_alive(state["run_id"]):
         logger.warning(f"{genre}: run {state['run_id']} morto, forzo ricreazione")
         cancel_run(state.get("next_run_id"))
-        if state.get("broadcast_id") and state.get("stream_id"):
-            end_broadcast(yt, state["broadcast_id"], state["stream_id"])
-        state["broadcast_id"] = state["stream_id"] = state["rtmp_url"] = None
+        # Il job e' morto: l'RTMP e' gia' fermo, YouTube completera' il broadcast da solo.
+        # Non azzerare broadcast_id: _dispatch_fresh verifica broadcast_is_alive e lo riusa
+        # se ancora "live" (YouTube impiega qualche minuto a rilevare lo stream fermo),
+        # evitando di creare un secondo broadcast concorrente.
         state["run_id"] = state["next_run_id"] = state["next_start_at"] = None
         _dispatch_fresh(drive, yt, root_folder_id, state_folder_id, genre, state, start_at=now)
         return
@@ -458,7 +459,12 @@ def process_genre(drive, yt, root_folder_id: str, state_folder_id: str, genre: s
             cancel_run(state.get("run_id"))
             cancel_run(state.get("next_run_id"))
             end_broadcast(yt, state["broadcast_id"], state["stream_id"])
-            state["broadcast_id"] = state["stream_id"] = state["rtmp_url"] = None
+            # Azzerare broadcast_id solo se end_broadcast ha davvero terminato il broadcast.
+            # Se il job e' ancora vivo (cancel asincrono) e YouTube ha rifiutato la transizione,
+            # _dispatch_fresh trovera' il broadcast ancora alive e usera' lo stesso RTMP URL:
+            # il nuovo job sfratta quello vecchio al collegamento, senza creare un duplicato.
+            if not broadcast_is_alive(yt, state.get("broadcast_id", "")):
+                state["broadcast_id"] = state["stream_id"] = state["rtmp_url"] = None
             state["next_run_id"] = state["next_start_at"] = None
             _dispatch_fresh(drive, yt, root_folder_id, state_folder_id, genre, state, start_at=now)
             return
