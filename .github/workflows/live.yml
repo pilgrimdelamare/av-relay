@@ -66,7 +66,7 @@ jobs:
             -vsync cfr -r 25 \
             -c:v libx264 -preset veryfast -b:v 4500k -maxrate 5500k -bufsize 11000k \
             -pix_fmt yuv420p -g 50 -keyint_min 50 -bf 0 \
-            -c:a aac -b:a 192k -ar 44100 -ac 2 \
+            -c:a aac -b:a 192k -ar 44100 -ac 2 -af "aresample=async=1000" \
             merged.mp4
 
           while [ "$(date +%s)" -lt "$START_AT" ]; do
