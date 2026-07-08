@@ -41,7 +41,7 @@ jobs:
       - name: setup
         run: |
           pip install --quiet google-api-python-client google-auth
-          sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+          which ffmpeg || (sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg)
 
       - name: auth
         run: echo '${{ secrets.GDRIVE_SA_KEY }}' > sa.json
