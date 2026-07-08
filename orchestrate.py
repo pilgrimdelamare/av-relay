@@ -15,6 +15,7 @@ MIN_VIDEOS_FOR_LIVE = 5
 RELAY_DURATION_MIN  = 290
 PREP_LEAD_MIN       = 40
 HANDOFF_BUFFER_S    = 5
+PENDING_STALE_MIN   = 10
 STATE_FOLDER_NAME   = "_orchestrator_state"
 
 GENRES = ["electro-swing", "rock", "pop", "k-pop", "lofi-chillout"]
@@ -381,17 +382,20 @@ def _dispatch_next(drive, root_folder_id: str, state_folder_id: str, genre: str,
     if batch is None:
         return
 
-    state["next_run_id"]   = "pending"
-    state["next_start_at"] = start_at.isoformat()
+    state["next_run_id"]        = "pending"
+    state["next_start_at"]      = start_at.isoformat()
+    state["next_pending_since"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
     write_state_file(drive, state_folder_id, f"{genre}.json", state)
 
     run_id = dispatch_relay(genre, batch, state["rtmp_url"], RELAY_DURATION_MIN, start_at.timestamp())
     if not run_id:
-        state["next_run_id"]   = None
-        state["next_start_at"] = None
+        state["next_run_id"]        = None
+        state["next_start_at"]      = None
+        state["next_pending_since"] = None
         write_state_file(drive, state_folder_id, f"{genre}.json", state)
         return
-    state["next_run_id"] = run_id
+    state["next_run_id"]        = run_id
+    state["next_pending_since"] = None
     write_state_file(drive, state_folder_id, f"{genre}.json", state)
     logger.info(f"{genre}: prep ok {len(batch)}, start_at={start_at.isoformat()}")
 
@@ -404,6 +408,7 @@ def process_genre(drive, yt, root_folder_id: str, state_folder_id: str, genre: s
     }
     state.setdefault("next_run_id", None)
     state.setdefault("next_start_at", None)
+    state.setdefault("next_pending_since", None)
 
     enabled = control.get(genre, True)
     if not enabled:
@@ -413,6 +418,7 @@ def process_genre(drive, yt, root_folder_id: str, state_folder_id: str, genre: s
             end_broadcast(yt, state["broadcast_id"], state["stream_id"])
             state["broadcast_id"] = state["stream_id"] = state["rtmp_url"] = None
             state["run_id"] = state["next_run_id"] = state["next_start_at"] = None
+            state["next_pending_since"] = None
             write_state_file(drive, state_folder_id, f"{genre}.json", state)
         return
 
@@ -420,19 +426,37 @@ def process_genre(drive, yt, root_folder_id: str, state_folder_id: str, genre: s
 
     if state.get("next_run_id") and state.get("next_start_at"):
         if state["next_run_id"] == "pending":
-            # Dispatch precedente interrotto prima di ricevere il run_id reale:
-            # non ri-dispatchare (rischierebbe doppio stream), aspetta il prossimo run.
-            logger.info(f"{genre}: next dispatch pending, skip")
-            return
-        next_start = datetime.datetime.fromisoformat(state["next_start_at"])
-        if now >= next_start:
-            state["run_id"]           = state["next_run_id"]
-            state["last_dispatch_at"] = state["next_start_at"]
-            state["next_run_id"]      = None
-            state["next_start_at"]    = None
+            # Dispatch precedente interrotto prima di ricevere il run_id reale.
+            # Se il marker e' recente, aspetta ancora (rischierebbe doppio stream
+            # ridispatchare subito). Se e' bloccato da troppo, il processo che
+            # doveva risolverlo e' morto (es. cancel-in-progress a meta') e va
+            # trattato come fallito, altrimenti il genere resta muto per sempre.
+            pending_since = state.get("next_pending_since")
+            if pending_since:
+                stale_min = (now - datetime.datetime.fromisoformat(pending_since)).total_seconds() / 60
+            else:
+                stale_min = 0
+                state["next_pending_since"] = now.isoformat()
+                write_state_file(drive, state_folder_id, f"{genre}.json", state)
+            if stale_min <= PENDING_STALE_MIN:
+                logger.info(f"{genre}: next dispatch pending, skip")
+                return
+            logger.warning(f"{genre}: next dispatch pending da oltre {PENDING_STALE_MIN} min, considero fallito")
+            state["next_run_id"] = None
+            state["next_start_at"] = None
+            state["next_pending_since"] = None
             write_state_file(drive, state_folder_id, f"{genre}.json", state)
-            logger.info(f"{genre}: handoff completato")
-        return
+            # non return: prosegue nel flusso normale, il check PREP_LEAD sotto ridispatchera'
+        else:
+            next_start = datetime.datetime.fromisoformat(state["next_start_at"])
+            if now >= next_start:
+                state["run_id"]           = state["next_run_id"]
+                state["last_dispatch_at"] = state["next_start_at"]
+                state["next_run_id"]      = None
+                state["next_start_at"]    = None
+                write_state_file(drive, state_folder_id, f"{genre}.json", state)
+                logger.info(f"{genre}: handoff completato")
+            return
 
     last = state.get("last_dispatch_at")
 
