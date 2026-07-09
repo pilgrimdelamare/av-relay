@@ -19,6 +19,10 @@ on:
       start_at:
         required: true
         type: string
+      rtmp_url_square:
+        required: false
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -30,7 +34,9 @@ jobs:
     timeout-minutes: 360
     steps:
       - name: mask
-        run: echo "::add-mask::${{ inputs.rtmp_url }}"
+        run: |
+          echo "::add-mask::${{ inputs.rtmp_url }}"
+          [ -n "${{ inputs.rtmp_url_square }}" ] && echo "::add-mask::${{ inputs.rtmp_url_square }}" || true
 
       - uses: actions/checkout@v4
 
@@ -54,6 +60,7 @@ jobs:
       - name: run
         env:
           RTMP_URL:         ${{ inputs.rtmp_url }}
+          RTMP_URL_SQUARE:  ${{ inputs.rtmp_url_square }}
           DURATION_MINUTES: ${{ inputs.duration_minutes }}
           START_AT:         ${{ inputs.start_at }}
           GH_TOKEN:         ${{ secrets.GITHUB_TOKEN }}
@@ -68,6 +75,15 @@ jobs:
             -pix_fmt yuv420p -g 50 -keyint_min 50 -bf 0 \
             -c:a aac -b:a 192k -ar 44100 -ac 2 -af "aresample=async=1000" \
             merged.mp4
+
+          if [ -n "$RTMP_URL_SQUARE" ] && [ -s merged.mp4 ]; then
+            ffmpeg -i merged.mp4 \
+              -vf "crop=1080:1080:420:0" \
+              -c:v libx264 -preset veryfast -b:v 2500k -maxrate 3000k -bufsize 6000k \
+              -pix_fmt yuv420p -g 50 -keyint_min 50 -bf 0 \
+              -c:a copy \
+              merged_square.mp4
+          fi
 
           while [ "$(date +%s)" -lt "$START_AT" ]; do
             sleep 5
@@ -111,11 +127,20 @@ jobs:
                 -f flv "$RTMP_URL" &
             fi
             pid=$!
-            ( sleep "$remaining" && kill "$pid" 2>/dev/null ) &
+            pid_sq=0
+            if [ -n "$RTMP_URL_SQUARE" ] && [ -s merged_square.mp4 ]; then
+              ffmpeg -re -stream_loop -1 \
+                -i merged_square.mp4 \
+                -c copy \
+                -f flv "$RTMP_URL_SQUARE" &
+              pid_sq=$!
+            fi
+            ( sleep "$remaining" && kill "$pid" 2>/dev/null; [ "$pid_sq" -ne 0 ] && kill "$pid_sq" 2>/dev/null; true ) &
             watchdog=$!
             wait "$pid"
             code=$?
             kill "$watchdog" 2>/dev/null
+            [ "$pid_sq" -ne 0 ] && kill "$pid_sq" 2>/dev/null || true
             if [ "$(date +%s)" -ge "$end_time" ]; then
               break
             fi
