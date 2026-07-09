@@ -129,26 +129,25 @@ def census_genre(drive, root_folder_id: str, genre: str) -> tuple:
         all_files = res.get("files", [])
         mp4s  = [f for f in all_files if f["mimeType"] == "video/mp4"]
         jsons = [f for f in all_files if f["name"] == "metadata.json"]
-        for mp4 in mp4s:
+        for mp4, json_f in zip(mp4s, jsons):
             video_ids.append(mp4["id"])
-            if jsons:
-                try:
-                    raw = drive.files().get_media(fileId=jsons[0]["id"]).execute()
-                    m = json.loads(raw)
-                    tags_raw = m.get("tags", [])
-                    if isinstance(tags_raw, str):
-                        try:
-                            tags_raw = json.loads(tags_raw)
-                        except Exception:
-                            tags_raw = []
-                    meta_cache[mp4["id"]] = {
-                        "title":       m.get("title") or "?",
-                        "youtube_url": m.get("youtube_url") or "",
-                        "mood":        m.get("mood") or "",
-                        "tags":        [t for t in tags_raw if isinstance(t, str)],
-                    }
-                except Exception:
-                    pass
+            try:
+                raw = drive.files().get_media(fileId=json_f["id"]).execute()
+                m = json.loads(raw)
+                tags_raw = m.get("tags", [])
+                if isinstance(tags_raw, str):
+                    try:
+                        tags_raw = json.loads(tags_raw)
+                    except Exception:
+                        tags_raw = []
+                meta_cache[mp4["id"]] = {
+                    "title":       m.get("title") or "?",
+                    "youtube_url": m.get("youtube_url") or "",
+                    "mood":        m.get("mood") or "",
+                    "tags":        [t for t in tags_raw if isinstance(t, str)],
+                }
+            except Exception:
+                pass
     return video_ids, meta_cache
 
 
@@ -485,6 +484,9 @@ def _dispatch_fresh(drive, yt, root_folder_id: str, state_folder_id: str, genre:
         return
     state["run_id"]           = run_id
     state["last_dispatch_at"] = start_at.isoformat()
+    if not state.get("meta_cache"):
+        _, mc = census_genre(drive, root_folder_id, genre)
+        state["meta_cache"] = mc
     write_state_file(drive, state_folder_id, f"{genre}.json", state)
     update_live_seo(yt, state["broadcast_id"], genre, batch, state.get("meta_cache", {}))
     logger.info(f"{genre}: ok {len(batch)} (fresh)")
@@ -515,6 +517,10 @@ def _dispatch_next(drive, yt, root_folder_id: str, state_folder_id: str, genre: 
     state["next_run_id"]        = run_id
     state["next_pending_since"] = None
     write_state_file(drive, state_folder_id, f"{genre}.json", state)
+    if not state.get("meta_cache"):
+        _, mc = census_genre(drive, root_folder_id, genre)
+        state["meta_cache"] = mc
+        write_state_file(drive, state_folder_id, f"{genre}.json", state)
     update_live_seo(yt, state["broadcast_id"], genre, batch, state.get("meta_cache", {}))
     logger.info(f"{genre}: prep ok {len(batch)}, start_at={start_at.isoformat()}")
 
