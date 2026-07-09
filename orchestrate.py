@@ -490,7 +490,7 @@ def _dispatch_fresh(drive, yt, root_folder_id: str, state_folder_id: str, genre:
     logger.info(f"{genre}: ok {len(batch)} (fresh)")
 
 
-def _dispatch_next(drive, root_folder_id: str, state_folder_id: str, genre: str, state: dict,
+def _dispatch_next(drive, yt, root_folder_id: str, state_folder_id: str, genre: str, state: dict,
                     start_at: datetime.datetime):
     """Pre-carica il prossimo lotto. Scrive un marker 'pending' su Drive PRIMA del dispatch
     per evitare doppi invii se orchestrate viene interrotto tra dispatch e scrittura run_id."""
@@ -614,7 +614,7 @@ def process_genre(drive, yt, root_folder_id: str, state_folder_id: str, genre: s
 
     if now >= current_end - datetime.timedelta(minutes=PREP_LEAD_MIN):
         start_at = current_end + datetime.timedelta(seconds=HANDOFF_BUFFER_S)
-        _dispatch_next(drive, root_folder_id, state_folder_id, genre, state, start_at=start_at)
+        _dispatch_next(drive, yt, root_folder_id, state_folder_id, genre, state, start_at=start_at)
         return
 
 
