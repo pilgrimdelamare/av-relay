@@ -13,12 +13,13 @@ logger = logging.getLogger("orchestrate")
 BATCH_SIZE          = 25
 MIN_VIDEOS_FOR_LIVE = 5
 RELAY_DURATION_MIN  = 290
-PREP_LEAD_MIN       = 40
+PREP_LEAD_MIN       = 55
 HANDOFF_BUFFER_S    = 5
 PENDING_STALE_MIN   = 10
 STATE_FOLDER_NAME   = "_orchestrator_state"
 
 GENRES = ["electro-swing", "rock", "pop", "k-pop", "lofi-chillout"]
+SQUARE_GENRES = ["k-pop", "electro-swing", "pop"]
 
 LIVE_DESCRIPTIONS = {
     "electro-swing": (
@@ -328,7 +329,7 @@ def _gh_request(repo: str, token: str, method: str, path: str, payload: dict = N
         return json.load(r) if r.length != 0 else {}
 
 
-def dispatch_relay(genre: str, video_ids: list[str], rtmp_url: str, duration_minutes: int, start_at: float) -> int | None:
+def dispatch_relay(genre: str, video_ids: list[str], rtmp_url: str, duration_minutes: int, start_at: float, rtmp_url_sq: str = "") -> int | None:
     repo  = os.environ["GITHUB_REPOSITORY"]
     token = os.environ["GITHUB_TOKEN"]
     ts_before = time.time()
@@ -341,6 +342,7 @@ def dispatch_relay(genre: str, video_ids: list[str], rtmp_url: str, duration_min
                 "rtmp_url":         rtmp_url,
                 "duration_minutes": str(duration_minutes),
                 "start_at":         str(int(start_at)),
+                "rtmp_url_square":  rtmp_url_sq,
             },
         })
     except urllib.error.HTTPError as e:
@@ -479,7 +481,15 @@ def _dispatch_fresh(drive, yt, root_folder_id: str, state_folder_id: str, genre:
             return
         state["broadcast_id"], state["stream_id"], state["rtmp_url"] = result
 
-    run_id = dispatch_relay(genre, batch, state["rtmp_url"], RELAY_DURATION_MIN, start_at.timestamp())
+    if genre in SQUARE_GENRES:
+        sq_alive = state.get("broadcast_id_sq") and broadcast_is_alive(yt, state["broadcast_id_sq"])
+        if not sq_alive:
+            result_sq = create_persistent_broadcast(yt, genre)
+            if result_sq:
+                state["broadcast_id_sq"], state["stream_id_sq"], state["rtmp_url_sq"] = result_sq
+
+    run_id = dispatch_relay(genre, batch, state["rtmp_url"], RELAY_DURATION_MIN, start_at.timestamp(),
+                            rtmp_url_sq=state.get("rtmp_url_sq", ""))
     if not run_id:
         return
     state["run_id"]           = run_id
@@ -507,7 +517,8 @@ def _dispatch_next(drive, yt, root_folder_id: str, state_folder_id: str, genre: 
     state["next_pending_since"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
     write_state_file(drive, state_folder_id, f"{genre}.json", state)
 
-    run_id = dispatch_relay(genre, batch, state["rtmp_url"], RELAY_DURATION_MIN, start_at.timestamp())
+    run_id = dispatch_relay(genre, batch, state["rtmp_url"], RELAY_DURATION_MIN, start_at.timestamp(),
+                            rtmp_url_sq=state.get("rtmp_url_sq", ""))
     if not run_id:
         state["next_run_id"]        = None
         state["next_start_at"]      = None
@@ -530,13 +541,18 @@ def process_genre(drive, yt, root_folder_id: str, state_folder_id: str, genre: s
         "cycle": 0, "pool": [], "last_dispatch_at": None,
         "broadcast_id": None, "stream_id": None, "rtmp_url": None, "run_id": None,
         "next_run_id": None, "next_start_at": None,
+        "broadcast_id_sq": None, "stream_id_sq": None, "rtmp_url_sq": None,
     }
     state.setdefault("next_run_id", None)
     state.setdefault("next_start_at", None)
     state.setdefault("next_pending_since", None)
+    state.setdefault("broadcast_id_sq", None)
+    state.setdefault("stream_id_sq", None)
+    state.setdefault("rtmp_url_sq", None)
 
     enabled = control.get(genre, True)
     if not enabled:
+        changed = False
         if state.get("broadcast_id"):
             cancel_run(state.get("run_id"))
             cancel_run(state.get("next_run_id"))
@@ -544,6 +560,12 @@ def process_genre(drive, yt, root_folder_id: str, state_folder_id: str, genre: s
             state["broadcast_id"] = state["stream_id"] = state["rtmp_url"] = None
             state["run_id"] = state["next_run_id"] = state["next_start_at"] = None
             state["next_pending_since"] = None
+            changed = True
+        if state.get("broadcast_id_sq"):
+            end_broadcast(yt, state["broadcast_id_sq"], state["stream_id_sq"])
+            state["broadcast_id_sq"] = state["stream_id_sq"] = state["rtmp_url_sq"] = None
+            changed = True
+        if changed:
             write_state_file(drive, state_folder_id, f"{genre}.json", state)
         return
 
