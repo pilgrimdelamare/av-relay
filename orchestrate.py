@@ -515,6 +515,12 @@ def _dispatch_next(drive, yt, root_folder_id: str, state_folder_id: str, genre: 
     state["next_run_id"]        = "pending"
     state["next_start_at"]      = start_at.isoformat()
     state["next_pending_since"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    if genre in SQUARE_GENRES:
+        sq_alive = state.get("broadcast_id_sq") and broadcast_is_alive(yt, state["broadcast_id_sq"])
+        if not sq_alive:
+            result_sq = create_persistent_broadcast(yt, genre)
+            if result_sq:
+                state["broadcast_id_sq"], state["stream_id_sq"], state["rtmp_url_sq"] = result_sq
     write_state_file(drive, state_folder_id, f"{genre}.json", state)
 
     run_id = dispatch_relay(genre, batch, state["rtmp_url"], RELAY_DURATION_MIN, start_at.timestamp(),
