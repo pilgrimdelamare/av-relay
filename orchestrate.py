@@ -115,15 +115,41 @@ def get_or_create_state_folder(drive, root_folder_id: str) -> str:
     return drive.files().create(body=meta, fields="id").execute()["id"]
 
 
-def census_genre(drive, root_folder_id: str, genre: str) -> list[str]:
+def census_genre(drive, root_folder_id: str, genre: str) -> tuple:
+    """Ritorna (video_ids, meta_cache) dove meta_cache[file_id] = {title, youtube_url, mood, tags}."""
     genre_folder_id = find_folder(drive, genre, root_folder_id)
     if not genre_folder_id:
-        return []
-    video_ids = []
+        return [], {}
+    video_ids, meta_cache = [], {}
     for date_folder in _list_children(drive, genre_folder_id, "application/vnd.google-apps.folder"):
-        for f in _list_children(drive, date_folder["id"], "video/mp4"):
-            video_ids.append(f["id"])
-    return video_ids
+        res = drive.files().list(
+            q=f"'{date_folder['id']}' in parents and trashed=false",
+            fields="files(id,name,mimeType)",
+        ).execute()
+        all_files = res.get("files", [])
+        mp4s  = [f for f in all_files if f["mimeType"] == "video/mp4"]
+        jsons = [f for f in all_files if f["name"] == "metadata.json"]
+        for mp4 in mp4s:
+            video_ids.append(mp4["id"])
+            if jsons:
+                try:
+                    raw = drive.files().get_media(fileId=jsons[0]["id"]).execute()
+                    m = json.loads(raw)
+                    tags_raw = m.get("tags", [])
+                    if isinstance(tags_raw, str):
+                        try:
+                            tags_raw = json.loads(tags_raw)
+                        except Exception:
+                            tags_raw = []
+                    meta_cache[mp4["id"]] = {
+                        "title":       m.get("title") or "?",
+                        "youtube_url": m.get("youtube_url") or "",
+                        "mood":        m.get("mood") or "",
+                        "tags":        [t for t in tags_raw if isinstance(t, str)],
+                    }
+                except Exception:
+                    pass
+    return video_ids, meta_cache
 
 
 def read_state_file(drive, folder_id: str, filename: str) -> dict | None:
@@ -340,15 +366,106 @@ def dispatch_relay(genre: str, video_ids: list[str], rtmp_url: str, duration_min
 
 def _pick_batch(drive, root_folder_id: str, genre: str, state: dict) -> list[str] | None:
     if len(state["pool"]) < MIN_VIDEOS_FOR_LIVE:
-        all_ids = census_genre(drive, root_folder_id, genre)
+        all_ids, meta_cache = census_genre(drive, root_folder_id, genre)
         if len(all_ids) < MIN_VIDEOS_FOR_LIVE:
             logger.warning(f"{genre}: skip ({len(all_ids)})")
             return None
         random.shuffle(all_ids)
-        state["pool"]  = all_ids
-        state["cycle"] = state.get("cycle", 0) + 1
+        state["pool"]       = all_ids
+        state["meta_cache"] = meta_cache
+        state["cycle"]      = state.get("cycle", 0) + 1
     batch, state["pool"] = state["pool"][:BATCH_SIZE], state["pool"][BATCH_SIZE:]
     return batch
+
+
+_TIME_CONTEXTS = [
+    (6,  12, "Morning Vibes & Energy"),
+    (12, 18, "Daylight Mix / Focus & Work"),
+    (18, 24, "Evening Lounge / Sunset Beats"),
+    (0,  6,  "Late Night Drive / Deep Chill"),
+]
+
+
+def _time_context() -> str:
+    import zoneinfo
+    h = datetime.datetime.now(datetime.timezone.utc).astimezone(zoneinfo.ZoneInfo("Europe/Rome")).hour
+    for start, end, label in _TIME_CONTEXTS:
+        if start <= h < end:
+            return label
+    return "Late Night Drive / Deep Chill"
+
+
+def update_live_seo(yt, broadcast_id: str, genre: str, batch: list, meta_cache: dict):
+    """Aggiorna titolo/descrizione/tag del video live con i dati del lotto corrente."""
+    try:
+        res = yt.videos().list(part="snippet", id=broadcast_id).execute()
+        items = res.get("items", [])
+        if not items:
+            logger.warning(f"{genre}: SEO live — video non trovato {broadcast_id}")
+            return
+        snippet = items[0]["snippet"]
+    except Exception as e:
+        logger.warning(f"{genre}: SEO live get fallita: {e}")
+        return
+
+    metas = [meta_cache.get(fid) for fid in batch]
+    valid = [m for m in metas if m]
+
+    moods = [m["mood"] for m in valid if m.get("mood")]
+    if moods:
+        from collections import Counter
+        batch_mood = Counter(moods).most_common(1)[0][0].capitalize()
+    else:
+        batch_mood = "Upbeat"
+
+    genre_label = genre.replace("-", " ").title()
+    time_ctx = _time_context()
+    title = f"{genre_label} Radio 🔴 {time_ctx} ({batch_mood}) — Majesty Music Live 24/7"[:100]
+
+    lines = [
+        "🎧 NOW PLAYING PLAYLIST (Next 5 Hours)",
+        "━" * 46, "",
+    ]
+    for i, m in enumerate(metas, 1):
+        t   = m["title"] if m else "?"
+        url = m["youtube_url"] if m and m.get("youtube_url") else ""
+        lines.append(f"{i}. {t}" + (f" ➡ {url}" if url else ""))
+    lines += [
+        "", "━" * 46, "",
+        "✨ ABOUT MAJESTY MUSIC",
+        "We bring you original AI-generated tracks, continuous soundscapes and always-fresh music.",
+        "",
+        f"🎵 GENRE: {genre.upper()}",
+        f"🎭 CURRENT MOOD: {batch_mood}",
+        "",
+        "👉 Subscribe for daily drops and continuous high-quality streams!",
+        "",
+        f"#{genre.replace('-', '')} #{batch_mood.lower()} #majestymusic #liveradio #aimusic",
+    ]
+    description = "\n".join(lines)[:5000]
+
+    global_tags = ["Majesty Music", "Live Radio", "24/7 Music", "AI Music", "Original Tracks"]
+    genre_tags  = [f"{genre} live", f"{genre} radio", f"{genre} mix"]
+    song_tags: list = []
+    for m in valid:
+        song_tags.extend(m.get("tags", []))
+    seen: set = set()
+    all_tags: list = []
+    for t in global_tags + genre_tags + song_tags:
+        tl = t.lower()
+        if tl not in seen:
+            seen.add(tl)
+            all_tags.append(t)
+    all_tags = all_tags[:500]
+
+    snippet["title"]       = title
+    snippet["description"] = description
+    snippet["tags"]        = all_tags
+    try:
+        yt.videos().update(part="snippet", body={"id": broadcast_id, "snippet": snippet}).execute()
+        logger.info(f"{genre}: SEO live ok")
+    except Exception as e:
+        logger.warning(f"{genre}: SEO live update fallita: {e}")
 
 
 def _dispatch_fresh(drive, yt, root_folder_id: str, state_folder_id: str, genre: str, state: dict,
@@ -369,6 +486,7 @@ def _dispatch_fresh(drive, yt, root_folder_id: str, state_folder_id: str, genre:
     state["run_id"]           = run_id
     state["last_dispatch_at"] = start_at.isoformat()
     write_state_file(drive, state_folder_id, f"{genre}.json", state)
+    update_live_seo(yt, state["broadcast_id"], genre, batch, state.get("meta_cache", {}))
     logger.info(f"{genre}: ok {len(batch)} (fresh)")
 
 
@@ -397,6 +515,7 @@ def _dispatch_next(drive, root_folder_id: str, state_folder_id: str, genre: str,
     state["next_run_id"]        = run_id
     state["next_pending_since"] = None
     write_state_file(drive, state_folder_id, f"{genre}.json", state)
+    update_live_seo(yt, state["broadcast_id"], genre, batch, state.get("meta_cache", {}))
     logger.info(f"{genre}: prep ok {len(batch)}, start_at={start_at.isoformat()}")
 
 
