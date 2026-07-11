@@ -129,26 +129,27 @@ def census_genre(drive, root_folder_id: str, genre: str) -> tuple:
         ).execute()
         all_files = res.get("files", [])
         mp4s  = [f for f in all_files if f["mimeType"] == "video/mp4"]
-        jsons = [f for f in all_files if f["name"] == "metadata.json"]
-        for mp4, json_f in zip(mp4s, jsons):
+        json_f = next((f for f in all_files if f["name"] == "metadata.json"), None)
+        for mp4 in mp4s:
             video_ids.append(mp4["id"])
-            try:
-                raw = drive.files().get_media(fileId=json_f["id"]).execute()
-                m = json.loads(raw)
-                tags_raw = m.get("tags", [])
-                if isinstance(tags_raw, str):
-                    try:
-                        tags_raw = json.loads(tags_raw)
-                    except Exception:
-                        tags_raw = []
-                meta_cache[mp4["id"]] = {
-                    "title":       m.get("title") or "?",
-                    "youtube_url": m.get("youtube_url") or "",
-                    "mood":        m.get("mood") or "",
-                    "tags":        [t for t in tags_raw if isinstance(t, str)],
-                }
-            except Exception:
-                pass
+            if json_f:
+                try:
+                    raw = drive.files().get_media(fileId=json_f["id"]).execute()
+                    m = json.loads(raw)
+                    tags_raw = m.get("tags", [])
+                    if isinstance(tags_raw, str):
+                        try:
+                            tags_raw = json.loads(tags_raw)
+                        except Exception:
+                            tags_raw = []
+                    meta_cache[mp4["id"]] = {
+                        "title":       m.get("title") or "?",
+                        "youtube_url": m.get("youtube_url") or "",
+                        "mood":        m.get("mood") or "",
+                        "tags":        [t for t in tags_raw if isinstance(t, str)],
+                    }
+                except Exception:
+                    pass
     return video_ids, meta_cache
 
 
