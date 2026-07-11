@@ -14,7 +14,7 @@ BATCH_SIZE          = 25
 MIN_VIDEOS_FOR_LIVE = 5
 RELAY_DURATION_MIN  = 290
 PREP_LEAD_MIN       = 55
-HANDOFF_BUFFER_S    = 5
+HANDOFF_BUFFER_S    = 20
 PENDING_STALE_MIN   = 10
 STATE_FOLDER_NAME   = "_orchestrator_state"
 
@@ -500,6 +500,8 @@ def _dispatch_fresh(drive, yt, root_folder_id: str, state_folder_id: str, genre:
         state["meta_cache"] = mc
     write_state_file(drive, state_folder_id, f"{genre}.json", state)
     update_live_seo(yt, state["broadcast_id"], genre, batch, state.get("meta_cache", {}))
+    if state.get("broadcast_id_sq"):
+        update_live_seo(yt, state["broadcast_id_sq"], genre, batch, state.get("meta_cache", {}))
     logger.info(f"{genre}: ok {len(batch)} (fresh)")
 
 
@@ -540,6 +542,8 @@ def _dispatch_next(drive, yt, root_folder_id: str, state_folder_id: str, genre: 
         state["meta_cache"] = mc
         write_state_file(drive, state_folder_id, f"{genre}.json", state)
     update_live_seo(yt, state["broadcast_id"], genre, batch, state.get("meta_cache", {}))
+    if state.get("broadcast_id_sq"):
+        update_live_seo(yt, state["broadcast_id_sq"], genre, batch, state.get("meta_cache", {}))
     logger.info(f"{genre}: prep ok {len(batch)}, start_at={start_at.isoformat()}")
 
 
@@ -646,6 +650,17 @@ def process_genre(drive, yt, root_folder_id: str, state_folder_id: str, genre: s
             state["next_run_id"] = state["next_start_at"] = None
             _dispatch_fresh(drive, yt, root_folder_id, state_folder_id, genre, state, start_at=now)
             return
+
+    # Lo stream quadrato non ha un run_id/job dedicato: viene monitorato a parte
+    # per evitare che una connessione RTMP quadrata "bad" resti agganciata e venga
+    # riusata (rischio ingest concorrente sulla stessa chiave) al prossimo handoff.
+    if state.get("broadcast_id_sq") and state.get("stream_id_sq"):
+        if not stream_is_healthy(yt, state["stream_id_sq"]):
+            logger.warning(f"{genre}: stream quadrato bad, forzo ricreazione")
+            end_broadcast(yt, state["broadcast_id_sq"], state["stream_id_sq"])
+            if not broadcast_is_alive(yt, state.get("broadcast_id_sq", "")):
+                state["broadcast_id_sq"] = state["stream_id_sq"] = state["rtmp_url_sq"] = None
+                write_state_file(drive, state_folder_id, f"{genre}.json", state)
 
     if now >= current_end - datetime.timedelta(minutes=PREP_LEAD_MIN):
         start_at = current_end + datetime.timedelta(seconds=HANDOFF_BUFFER_S)
