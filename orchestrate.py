@@ -428,7 +428,16 @@ def update_live_seo(yt, broadcast_id: str, genre: str, batch: list, meta_cache: 
         "🎧 NOW PLAYING PLAYLIST (Next 5 Hours)",
         "━" * 46, "",
     ]
-    for i, m in enumerate(metas, 1):
+    seen_urls = set()
+    deduped = []
+    for m in metas:
+        url = (m.get("youtube_url") or "") if m else ""
+        if url and url in seen_urls:
+            continue
+        if url:
+            seen_urls.add(url)
+        deduped.append(m)
+    for i, m in enumerate(deduped, 1):
         t   = m["title"] if m else "?"
         url = m["youtube_url"] if m and m.get("youtube_url") else ""
         lines.append(f"{i}. {t}" + (f" ➡ {url}" if url else ""))
