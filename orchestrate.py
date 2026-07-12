@@ -129,12 +129,14 @@ def census_genre(drive, root_folder_id: str, genre: str) -> tuple:
         ).execute()
         all_files = res.get("files", [])
         mp4s  = [f for f in all_files if f["mimeType"] == "video/mp4"]
-        json_f = next((f for f in all_files if f["name"] == "metadata.json"), None)
+        json_by_stem = {f["name"].rsplit(".", 1)[0]: f for f in all_files if f["name"].endswith(".json")}
+        folder_meta_f = json_by_stem.get("metadata")
         for mp4 in mp4s:
             video_ids.append(mp4["id"])
-            if json_f:
+            meta_f = json_by_stem.get(mp4["name"].rsplit(".", 1)[0]) or folder_meta_f
+            if meta_f:
                 try:
-                    raw = drive.files().get_media(fileId=json_f["id"]).execute()
+                    raw = drive.files().get_media(fileId=meta_f["id"]).execute()
                     m = json.loads(raw)
                     tags_raw = m.get("tags", [])
                     if isinstance(tags_raw, str):
