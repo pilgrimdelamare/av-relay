@@ -369,7 +369,7 @@ def dispatch_relay(genre: str, video_ids: list[str], rtmp_url: str, duration_min
 
 
 def _pick_batch(drive, root_folder_id: str, genre: str, state: dict) -> list[str] | None:
-    if len(state["pool"]) < MIN_VIDEOS_FOR_LIVE:
+    if len(state["pool"]) < BATCH_SIZE:
         all_ids, meta_cache = census_genre(drive, root_folder_id, genre)
         if len(all_ids) < MIN_VIDEOS_FOR_LIVE:
             logger.warning(f"{genre}: skip ({len(all_ids)})")
