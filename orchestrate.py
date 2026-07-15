@@ -20,6 +20,8 @@ STATE_FOLDER_NAME   = "_orchestrator_state"
 
 GENRES = ["electro-swing", "rock", "pop", "k-pop", "lofi-chillout"]
 SQUARE_GENRES = ["k-pop", "electro-swing", "pop"]
+GLOBAL_TAGS = ["Majesty Music", "Live Radio", "24/7 Music", "AI Music", "Original Tracks"]
+TAG_CHAR_BUDGET = 460
 
 LIVE_DESCRIPTIONS = {
     "electro-swing": (
@@ -234,6 +236,14 @@ def create_persistent_broadcast(yt, genre: str) -> tuple | None:
         rtmp_url  = f"{ingest['ingestionAddress']}/{ingest['streamName']}"
 
         yt.liveBroadcasts().bind(part="id,contentDetails", id=broadcast_id, streamId=stream_id).execute()
+
+        try:
+            snip = yt.videos().list(part="snippet", id=broadcast_id).execute()["items"][0]["snippet"]
+            snip["tags"] = GLOBAL_TAGS + [f"{genre} live", f"{genre} radio", f"{genre} mix"]
+            yt.videos().update(part="snippet", body={"id": broadcast_id, "snippet": snip}).execute()
+        except Exception as e:
+            logger.warning(f"{genre}: tag fallback iniziali falliti: {e}")
+
         logger.info(f"{genre}: ok")
         return broadcast_id, stream_id, rtmp_url
     except Exception as e:
@@ -457,28 +467,37 @@ def update_live_seo(yt, broadcast_id: str, genre: str, batch: list, meta_cache: 
     ]
     description = "\n".join(lines)[:5000]
 
-    global_tags = ["Majesty Music", "Live Radio", "24/7 Music", "AI Music", "Original Tracks"]
-    genre_tags  = [f"{genre} live", f"{genre} radio", f"{genre} mix"]
+    genre_tags = [f"{genre} live", f"{genre} radio", f"{genre} mix"]
     song_tags: list = []
     for m in valid:
         song_tags.extend(m.get("tags", []))
     seen: set = set()
-    all_tags: list = []
-    for t in global_tags + genre_tags + song_tags:
+    dedup_tags: list = []
+    for t in GLOBAL_TAGS + genre_tags + song_tags:
         tl = t.lower()
         if tl not in seen:
             seen.add(tl)
-            all_tags.append(t)
-    all_tags = all_tags[:500]
+            dedup_tags.append(t)
+    all_tags, total_chars = [], 0
+    for t in dedup_tags:
+        cost = len(t) + 2
+        if total_chars + cost > TAG_CHAR_BUDGET:
+            break
+        all_tags.append(t)
+        total_chars += cost
 
     snippet["title"]       = title
     snippet["description"] = description
     snippet["tags"]        = all_tags
-    try:
-        yt.videos().update(part="snippet", body={"id": broadcast_id, "snippet": snippet}).execute()
-        logger.info(f"{genre}: SEO live ok")
-    except Exception as e:
-        logger.warning(f"{genre}: SEO live update fallita: {e}")
+    for attempt in range(3):
+        try:
+            yt.videos().update(part="snippet", body={"id": broadcast_id, "snippet": snippet}).execute()
+            logger.info(f"{genre}: SEO live ok")
+            return
+        except Exception as e:
+            logger.warning(f"{genre}: SEO live update fallita (tentativo {attempt + 1}/3): {e}")
+            if attempt < 2:
+                time.sleep(3)
 
 
 def _dispatch_fresh(drive, yt, root_folder_id: str, state_folder_id: str, genre: str, state: dict,
