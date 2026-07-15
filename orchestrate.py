@@ -492,6 +492,7 @@ def _dispatch_fresh(drive, yt, root_folder_id: str, state_folder_id: str, genre:
         if not result:
             return
         state["broadcast_id"], state["stream_id"], state["rtmp_url"] = result
+        write_state_file(drive, state_folder_id, f"{genre}.json", state)
 
     if genre in SQUARE_GENRES:
         sq_alive = state.get("broadcast_id_sq") and broadcast_is_alive(yt, state["broadcast_id_sq"])
@@ -499,6 +500,7 @@ def _dispatch_fresh(drive, yt, root_folder_id: str, state_folder_id: str, genre:
             result_sq = create_persistent_broadcast(yt, genre)
             if result_sq:
                 state["broadcast_id_sq"], state["stream_id_sq"], state["rtmp_url_sq"] = result_sq
+                write_state_file(drive, state_folder_id, f"{genre}.json", state)
 
     run_id = dispatch_relay(genre, batch, state["rtmp_url"], RELAY_DURATION_MIN, start_at.timestamp(),
                             rtmp_url_sq=state.get("rtmp_url_sq", ""))
