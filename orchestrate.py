@@ -262,11 +262,31 @@ def broadcast_is_alive(yt, broadcast_id: str) -> bool:
         return False
 
 
+def privatize_finished_broadcast(yt, broadcast_id: str):
+    """Mette in privato il VOD di una diretta conclusa, SOLO se lifeCycleStatus e'
+    complete/revoked: evita di nascondere per errore una diretta ancora attiva in caso
+    di falso negativo (es. errore API transitorio). Fallisce in silenzio."""
+    if not broadcast_id:
+        return
+    try:
+        items = yt.liveBroadcasts().list(part="status", id=broadcast_id).execute().get("items", [])
+        if not items or items[0]["status"].get("lifeCycleStatus") not in ("complete", "revoked"):
+            return
+        yt.videos().update(
+            part="status",
+            body={"id": broadcast_id,
+                  "status": {"privacyStatus": "private", "selfDeclaredMadeForKids": False}},
+        ).execute()
+    except Exception:
+        pass
+
+
 def end_broadcast(yt, broadcast_id: str, stream_id: str):
     try:
         yt.liveBroadcasts().transition(broadcastStatus="complete", id=broadcast_id, part="status").execute()
     except Exception:
         pass
+    privatize_finished_broadcast(yt, broadcast_id)
     try:
         yt.liveStreams().delete(id=stream_id).execute()
     except Exception:
@@ -507,6 +527,7 @@ def _dispatch_fresh(drive, yt, root_folder_id: str, state_folder_id: str, genre:
     if batch is None:
         return
     if not state.get("broadcast_id") or not broadcast_is_alive(yt, state["broadcast_id"]):
+        privatize_finished_broadcast(yt, state.get("broadcast_id"))
         result = create_persistent_broadcast(yt, genre)
         if not result:
             return
@@ -516,6 +537,7 @@ def _dispatch_fresh(drive, yt, root_folder_id: str, state_folder_id: str, genre:
     if genre in SQUARE_GENRES:
         sq_alive = state.get("broadcast_id_sq") and broadcast_is_alive(yt, state["broadcast_id_sq"])
         if not sq_alive:
+            privatize_finished_broadcast(yt, state.get("broadcast_id_sq"))
             result_sq = create_persistent_broadcast(yt, genre)
             if result_sq:
                 state["broadcast_id_sq"], state["stream_id_sq"], state["rtmp_url_sq"] = result_sq
@@ -553,6 +575,7 @@ def _dispatch_next(drive, yt, root_folder_id: str, state_folder_id: str, genre: 
     if genre in SQUARE_GENRES:
         sq_alive = state.get("broadcast_id_sq") and broadcast_is_alive(yt, state["broadcast_id_sq"])
         if not sq_alive:
+            privatize_finished_broadcast(yt, state.get("broadcast_id_sq"))
             result_sq = create_persistent_broadcast(yt, genre)
             if result_sq:
                 state["broadcast_id_sq"], state["stream_id_sq"], state["rtmp_url_sq"] = result_sq
